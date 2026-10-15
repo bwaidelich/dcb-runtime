@@ -1,5 +1,6 @@
-//! The runtime component, its `store` import implemented over UmaDB, and
-//! a pool of instances with the model loaded.
+//! The runtime component, its `store` import implemented over whichever
+//! event store the host connected to (`store.rs`), and a pool of
+//! instances with the model loaded.
 //!
 //! An instance decides one command at a time, so concurrent requests
 //! each take one from the pool; concurrent decisions need no lock among
@@ -10,8 +11,6 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Semaphore;
-use umadb_client::AsyncUmaDbClient;
-use umadb_dcb::{DcbAppendCondition, DcbError, DcbEvent, DcbEventStoreAsync, DcbQuery, DcbQueryItem};
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Result, Store, format_err};
 
@@ -26,42 +25,21 @@ pub use dcb::runtime::types::Event;
 pub use exports::dcb::runtime::decider::Outcome;
 use dcb::runtime::types::{AppendCondition, AppendError, QueryItem, SequencedEvent};
 
-pub struct Host {
-    client: Arc<AsyncUmaDbClient>,
-}
+use crate::store::EventStore;
 
-fn query_of(items: Vec<QueryItem>) -> DcbQuery {
-    items.into_iter().fold(DcbQuery::new(), |query, item| {
-        query.item(DcbQueryItem::new().types(item.types).tags(item.tags))
-    })
+pub struct Host {
+    store: Arc<EventStore>,
 }
 
 impl dcb::runtime::types::Host for Host {}
 
 impl dcb::runtime::store::Host for Host {
     async fn head(&mut self) -> Result<std::result::Result<Option<u64>, String>> {
-        Ok(self.client.head().await.map_err(|e| e.to_string()))
+        Ok(self.store.head().await)
     }
 
     async fn read(&mut self, query: Vec<QueryItem>) -> Result<std::result::Result<Vec<SequencedEvent>, String>> {
-        Ok(self
-            .client
-            .read_with_head(Some(query_of(query)), None, false, None)
-            .await
-            .map(|(events, _)| {
-                events
-                    .into_iter()
-                    .map(|sequenced| SequencedEvent {
-                        position: sequenced.position,
-                        event: Event {
-                            event_type: sequenced.event.event_type,
-                            data: String::from_utf8_lossy(&sequenced.event.data).into_owned(),
-                            tags: sequenced.event.tags,
-                        },
-                    })
-                    .collect()
-            })
-            .map_err(|e| e.to_string()))
+        Ok(self.store.read(query).await)
     }
 
     async fn append(
@@ -69,23 +47,7 @@ impl dcb::runtime::store::Host for Host {
         events: Vec<Event>,
         condition: Option<AppendCondition>,
     ) -> Result<std::result::Result<u64, AppendError>> {
-        let events = events
-            .into_iter()
-            .map(|event| {
-                DcbEvent::default()
-                    .event_type(event.event_type)
-                    .tags(event.tags)
-                    .data(event.data.into_bytes())
-            })
-            .collect();
-        let condition = condition.map(|condition| {
-            DcbAppendCondition::new(query_of(condition.fail_if_events_match)).after(condition.after)
-        });
-        Ok(match self.client.append(events, condition, None).await {
-            Ok(position) => Ok(position),
-            Err(DcbError::IntegrityError(_)) => Err(AppendError::Integrity),
-            Err(e) => Err(AppendError::Other(e.to_string())),
-        })
+        Ok(self.store.append(events, condition).await)
     }
 }
 
@@ -98,7 +60,7 @@ pub struct Pool {
     engine: Engine,
     component: Component,
     linker: Linker<Host>,
-    client: Arc<AsyncUmaDbClient>,
+    store: Arc<EventStore>,
     model: String,
     idle: Mutex<Vec<Instance>>,
     permits: Semaphore,
@@ -131,7 +93,7 @@ impl Pool {
     /// Loads the component and the model, and keeps `size` instances.
     /// The first is made here, so a model that does not load fails the
     /// start rather than the first request.
-    pub async fn new(wasm: &str, model: String, client: AsyncUmaDbClient, size: usize) -> Result<Self> {
+    pub async fn new(wasm: &str, model: String, store: EventStore, size: usize) -> Result<Self> {
         let engine = Engine::new(&Config::new())?;
         let component = load_component(&engine, wasm)?;
         let mut linker = Linker::new(&engine);
@@ -140,7 +102,7 @@ impl Pool {
             engine,
             component,
             linker,
-            client: Arc::new(client),
+            store: Arc::new(store),
             model,
             idle: Mutex::new(Vec::new()),
             permits: Semaphore::new(size.max(1)),
@@ -151,7 +113,7 @@ impl Pool {
     }
 
     async fn instance(&self) -> Result<Instance> {
-        let mut store = Store::new(&self.engine, Host { client: self.client.clone() });
+        let mut store = Store::new(&self.engine, Host { store: self.store.clone() });
         let runtime = Runtime::instantiate_async(&mut store, &self.component, &self.linker).await?;
         if let Err(message) = runtime.dcb_runtime_decider().call_init(&mut store, &self.model).await? {
             return Err(format_err!("the model does not load: {message}"));
@@ -194,7 +156,7 @@ impl Pool {
         .await
     }
 
-    pub fn client(&self) -> &AsyncUmaDbClient {
-        &self.client
+    pub fn store(&self) -> &EventStore {
+        &self.store
     }
 }

@@ -576,6 +576,7 @@ dependencies = [
  "clap",
  "jsonschema",
  "serde_json",
+ "tephra-client",
  "tokio",
  "umadb-client",
  "umadb-dcb",
@@ -1364,6 +1365,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "linkme"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3045e122bd98aef8ec3ad58ce84f0791f64e70163d1a02710af4aa11a4d54cc5"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77060ebe535362c3da75682cd17b0431017b6e7c5661e714fc69a7ad017d1301"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1593,6 +1614,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste-complete"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a4cf96a295ab7f0ec2334fa557745c0e9526595f6ebabbb129563a98dfc1b2a"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1732,6 +1759,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "protobuf"
+version = "4.35.1-release"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a169648cc34d6f327fea8919ca63f38261fb26405fde8879745dc0a483db328e"
+dependencies = [
+ "cc",
+ "linkme",
+ "paste-complete",
+ "protobuf-macros",
+]
+
+[[package]]
+name = "protobuf-codegen"
+version = "4.35.1-release"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19dffd9a419f79bca4fad6bc09d5ead0e932596b76e4b3d7e79acc7e2eba4b98"
+
+[[package]]
+name = "protobuf-macros"
+version = "4.35.1-release"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fddf7218148e92862511304cfde3ef07ce109e1f03e830601833b9f0cb901a75"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2356,6 +2411,41 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tephra-client"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "202ee7bd77128d45ad0c004dd92a4f9e7d3033445e40112fef3690e2a2b8e5fe"
+dependencies = [
+ "futures-core",
+ "tephra-proto",
+ "tephra-types",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "tephra-proto"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d54803bab0c71c8b660ebb4b4708ddb47eaef922df52c44dd96a55332e2a5455"
+dependencies = [
+ "protobuf",
+ "protobuf-codegen",
+ "tephra-types",
+ "tokio",
+]
+
+[[package]]
+name = "tephra-types"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a273d6fc445ad39bb4fd6cb235666aec8c775ca2e0aa0203376b7989fec0e8be"
+dependencies = [
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]

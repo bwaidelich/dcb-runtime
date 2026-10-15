@@ -19,7 +19,6 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use umadb_client::ServingStatus;
 
 use crate::component::{Event, Outcome, Pool};
 
@@ -121,10 +120,9 @@ async fn openapi(State(api): State<Arc<Api>>) -> Response {
 }
 
 async fn health(State(api): State<Arc<Api>>) -> Response {
-    match api.pool.client().check_health("").await {
-        Ok(ServingStatus::Serving) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
-        Ok(status) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store not serving", format!("{status:?}"), None),
-        Err(e) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store unreachable", e.to_string(), None),
+    match api.pool.store().health().await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
+        Err(reason) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store unavailable", reason, None),
     }
 }
 

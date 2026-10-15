@@ -2,7 +2,8 @@
 
 Runs a DCB Model, as authored in the
 [DCB Playground](https://github.com/dcb-events/dcb-playground), against a
-real DCB event store. One generic WebAssembly component takes any model
+real DCB event store – [UmaDB](https://umadb.io) or
+[Tephra](https://tephra.tqwewe.com). One generic WebAssembly component takes any model
 as data (its JSON envelope) and decides commands; the host connects it to
 a store.
 
@@ -34,7 +35,8 @@ Experimental. The reasoning behind it is in the playground's
 ## The HTTP API
 
 ```
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store http://localhost:50051
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store http://localhost:50051   # UmaDB
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store tephra://localhost:9000   # Tephra
 ```
 
 serves the model's commands at `http://127.0.0.1:8080`:
@@ -60,7 +62,9 @@ Requests are validated against the contract before anything is decided.
 | 500 | the command could not be decided (defective model, throwing script) |
 | 503 | the event store failed |
 
-Failures are RFC 9457 problem details. The server keeps one instance of
+Failures are RFC 9457 problem details. Every call to the store is
+bounded (`--store-timeout`, default 10s): a store that went away is a
+503, not a request that waits forever. The server keeps one instance of
 the component per command decided at once (`--instances`, default the
 number of CPUs, about 10 MB each). `run <model.json> <command> <args>`
 decides a single command instead and prints the response body.
@@ -80,8 +84,13 @@ Against a real store – needs Docker and a Rust toolchain:
 
 ```
 cargo build --release --manifest-path hosts/rust/Cargo.toml
-scripts/smoke-umadb.sh   # a throwaway UmaDB container and the HTTP server, every status checked
+scripts/smoke.sh umadb    # a throwaway store container and the HTTP server:
+scripts/smoke.sh tephra   # every status, and 40 requests racing for one seat
 ```
+
+The Tephra client generates its protocol code at build time and needs
+`protoc` 35.1 exactly – on the `PATH`, or named by `PROTOC`. To build
+without it: `cargo build --release --no-default-features --features umadb`.
 
 `npm test` runs every command scenario of the playground's shipped
 models and fixtures through the component, against an in-memory store
@@ -101,8 +110,11 @@ model's generated contract.
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.
-- `hosts/rust/` – the HTTP host over UmaDB (axum, wasmtime,
-  `umadb-client`). Compiling the component to native code takes
+- `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store.rs` holds
+  one adapter per event store, picked by the store URL's scheme and
+  each behind a Cargo feature (`umadb`, `tephra`; both by default).
+  Another DCB store is another adapter: `head`, `read`, `append`, and
+  its failed-condition error mapped to `Integrity`. Compiling the component to native code takes
   seconds, so the host keeps the result beside it
   (`dcb-runtime.wasm.cwasm`); later starts take a fraction of a second.
   `assets/swagger-ui/` is swagger-ui-dist 5.32.15, unmodified.

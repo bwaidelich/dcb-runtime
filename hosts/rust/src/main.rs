@@ -1,4 +1,5 @@
-//! A host for the DCB Runtime component over UmaDB.
+//! A host for the DCB Runtime component over a DCB event store – UmaDB
+//! or Tephra (`store.rs`).
 //!
 //!     dcb-runtime-host serve <model.json>                     an HTTP API for the model's commands
 //!     dcb-runtime-host run <model.json> <command> <args-json>  decide one command, print the outcome
@@ -7,17 +8,18 @@
 
 mod component;
 mod http;
+mod store;
 
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
-use umadb_client::AsyncUmaDbClient;
 use wasmtime::{Result, format_err};
 
 use component::Pool;
+use store::EventStore;
 
 #[derive(Parser)]
-#[command(version, about = "Runs a DCB Model against UmaDB")]
+#[command(version, about = "Runs a DCB Model against a DCB event store")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -27,12 +29,28 @@ struct Cli {
 struct Common {
     /// The model, as the playground exports it (JSON).
     model: String,
-    /// The UmaDB server.
-    #[arg(long, env = "UMADB_URL", default_value = "http://localhost:50051")]
+    /// The event store: http(s)://host:port for UmaDB, tephra://host:port for Tephra.
+    #[arg(long, env = "DCB_STORE", default_value = "http://localhost:50051")]
     store: String,
+    /// How long a call to the store may take before it counts as failed.
+    #[arg(long, env = "DCB_STORE_TIMEOUT", default_value = "10s", value_parser = parse_duration)]
+    store_timeout: std::time::Duration,
     /// The runtime component.
     #[arg(long, env = "DCB_RUNTIME_WASM", default_value = "build/dcb-runtime.wasm")]
     wasm: String,
+}
+
+/// `500ms`, `10s` or `2m`.
+fn parse_duration(text: &str) -> std::result::Result<std::time::Duration, String> {
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let n: u64 = number.parse().map_err(|_| format!("not a duration: {text}"))?;
+    match unit {
+        "ms" => Ok(std::time::Duration::from_millis(n)),
+        "s" | "" => Ok(std::time::Duration::from_secs(n)),
+        "m" => Ok(std::time::Duration::from_secs(n * 60)),
+        _ => Err(format!("not a duration: {text} (use ms, s or m)")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -65,10 +83,8 @@ enum Command {
 
 async fn pool(common: &Common, size: usize) -> Result<Pool> {
     let model = std::fs::read_to_string(&common.model).map_err(|e| format_err!("reading {}: {e}", common.model))?;
-    let client = AsyncUmaDbClient::connect(common.store.clone(), None, None, None)
-        .await
-        .map_err(|e| format_err!("connecting to {}: {e}", common.store))?;
-    Pool::new(&common.wasm, model, client, size).await
+    let store = EventStore::connect(&common.store, common.store_timeout).await?;
+    Pool::new(&common.wasm, model, store, size).await
 }
 
 #[tokio::main]
