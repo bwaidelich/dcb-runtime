@@ -27,19 +27,34 @@ const MAX_ATTEMPTS = 3;
 const RESTART_WITH_HEAD = Symbol('restart with head');
 
 let loaded = null;
+let contract = null;
+
+// A store that failed is no fault of the model's; the outcome says so
+// (`store`), so the host can answer it as the unavailability it is.
+class StoreFailure extends Error {}
 
 // What a failed import call carries – jco hands the err payload over
 // on the thrown value.
 const payloadOf = (error) => (error && error.payload !== undefined ? error.payload : error);
 
+const fromStore = (what, call) => {
+  try {
+    return call();
+  } catch (error) {
+    const payload = payloadOf(error);
+    throw new StoreFailure(`${what}: ${typeof payload === 'string' ? payload : evErrorText(error)}`);
+  }
+};
+
 function decide(command, args, withHead) {
-  const pos = withHead ? head() : undefined;
+  const pos = withHead ? fromStore('head', () => head()) : undefined;
   let calls = 0;
   let last;
   const port = (items) => {
     calls++;
     if (calls > 1 && !withHead) throw RESTART_WITH_HEAD;
-    return read(items.map(({ types, tags }) => ({ types, tags }))).map(({ position, event }) => {
+    const answered = fromStore('read', () => read(items.map(({ types, tags }) => ({ types, tags }))));
+    return answered.map(({ position, event }) => {
       if (last === undefined || position > last) last = position;
       // The position stays here: a script folds the event, and has no
       // use for a BigInt it cannot clone.
@@ -56,7 +71,8 @@ function handleOnce(command, args, withHead) {
     decided = decide(command, args, withHead);
   } catch (error) {
     if (error === RESTART_WITH_HEAD) return handleOnce(command, args, true);
-    return { tag: 'error', val: evErrorText(error) };
+    if (error instanceof StoreFailure) return { tag: 'store', val: error.message };
+    return { tag: 'evaluation', val: evErrorText(error) };
   }
   const { result, after } = decided;
   if (result.outcome === 'rejected') {
@@ -76,12 +92,14 @@ function handleOnce(command, args, withHead) {
   } catch (error) {
     const payload = payloadOf(error);
     if (payload && payload.tag === 'integrity') return null;
-    return { tag: 'error', val: `The store refused the append: ${payload && payload.val !== undefined ? payload.val : evErrorText(error)}` };
+    return { tag: 'store', val: `append: ${payload && payload.val !== undefined ? payload.val : evErrorText(error)}` };
   }
 }
 
 export const decider = {
   init(modelJson) {
+    loaded = null;
+    contract = null;
     let envelope;
     try {
       envelope = JSON.parse(modelJson);
@@ -96,32 +114,40 @@ export const decider = {
     try {
       imported = importModelFromEnvelope(envelope);
     } catch (error) {
-      loaded = null;
       throw evErrorText(error);
     }
     // Import is best-effort in the playground; a runtime deciding with
     // a definition silently missing is not.
     if (imported.skipped.length) {
-      loaded = null;
       throw imported.skipped.map((s) => `${s.kind} "${s.name}": ${s.reason}`).join('\n');
     }
     loaded = projectState()[imported.modelId];
   },
 
   handle(command, argsJson) {
-    if (!loaded) return { tag: 'error', val: 'No model is loaded.' };
+    if (!loaded) return { tag: 'evaluation', val: 'No model is loaded.' };
+    const body = evOwn(loaded['command-definitions'], command);
+    if (!body) return { tag: 'invalid', val: `The model has no command "${command}".` };
     let args;
     try {
       args = JSON.parse(argsJson);
     } catch (error) {
-      return { tag: 'error', val: `The arguments are no JSON: ${evErrorText(error)}` };
+      return { tag: 'invalid', val: `The arguments are no JSON: ${evErrorText(error)}` };
     }
-    const body = evOwn(loaded['command-definitions'], command);
-    const chained = !!body && deriveRounds(body).length > 1;
+    if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+      return { tag: 'invalid', val: 'The arguments are no JSON object.' };
+    }
+    const chained = deriveRounds(body).length > 1;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const outcome = handleOnce(command, args, chained);
       if (outcome) return outcome;
     }
     return { tag: 'conflict' };
+  },
+
+  contract() {
+    if (!loaded) throw 'No model is loaded.';
+    if (!contract) contract = JSON.stringify(buildContract(loaded));
+    return contract;
   },
 };

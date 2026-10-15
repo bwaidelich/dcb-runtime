@@ -20,6 +20,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const { createSandbox, loadApp, makeChecker } = require(join(root, 'playground', 'app', 'test-harness.js'));
 const { decider } = await import(join(root, 'build', 'node', 'dcb-runtime.js'));
+const { default: Ajv2020 } = await import('ajv/dist/2020.js');
 const store = await import(join(root, 'hosts', 'node', 'memory-store.mjs'));
 
 const { sandbox, store: oracleStorage } = createSandbox();
@@ -78,9 +79,36 @@ function componentOutcome(outcome) {
   switch (outcome.tag) {
     case 'rejected': return { rejected: { rejection: outcome.val.rejection ?? null, ruleIndex: outcome.val.ruleIndex } };
     case 'published': return { published: outcome.val.events.map((e) => ({ type: e.eventType, data: JSON.parse(e.data) })) };
-    case 'error': return { error: outcome.val };
+    case 'invalid': case 'evaluation': case 'store': return { error: outcome.val };
     default: return { [outcome.tag]: true };
   }
+}
+
+// The loaded model's contract as a validator: a command's request body,
+// or its `published` / `rejected` response, checked against the schema
+// the contract states for it.
+function contractValidator() {
+  const contract = JSON.parse(decider.contract());
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  ajv.addSchema({ ...contract, $id: 'contract' });
+  const pointer = (command, part) => {
+    const at = `contract#/paths/~1commands~1${command}/post`;
+    if (part === 'request') return `${at}/requestBody/content/application~1json/schema`;
+    return `${at}/responses/${part === 'published' ? 200 : 422}/content/application~1json/schema`;
+  };
+  return (command, part, value) => {
+    const validate = ajv.compile({ $ref: pointer(command, part) });
+    return validate(value) ? [] : validate.errors.map((e) => `${e.instancePath} ${e.message}`);
+  };
+}
+
+// A response body as the host sends it.
+function responseBody(outcome) {
+  if (outcome.tag === 'rejected') return { rejection: outcome.val.rejection ?? null, ruleIndex: outcome.val.ruleIndex };
+  return {
+    events: outcome.val.events.map((e) => ({ type: e.eventType, data: JSON.parse(e.data), tags: e.tags })),
+    position: outcome.val.position === undefined ? null : Number(outcome.val.position),
+  };
 }
 
 // ---------------------------------------------------------------
@@ -90,11 +118,17 @@ for (const { name, envelope } of envelopes()) {
   check(`${name}: every command scenario decides as the playground does`, () => {
     const model = oracleModel(envelope);
     decider.init(JSON.stringify(envelope));
+    const fits = contractValidator();
     for (const scenario of Object.values(model['scenario-definitions'] || {})) {
       const log = sandbox.scenarioLog(scenario);
       const args = (scenario.when && scenario.when.arguments) || {};
       store.reset(log.map((e) => storedEvent(model, e.type, e.data)));
-      const actual = componentOutcome(decider.handle(scenario.command, JSON.stringify(args)));
+      eq(fits(scenario.command, 'request', args), [], `${scenario.name} – arguments fit the contract`);
+      const outcome = decider.handle(scenario.command, JSON.stringify(args));
+      if (outcome.tag === 'published' || outcome.tag === 'rejected') {
+        eq(fits(scenario.command, outcome.tag, responseBody(outcome)), [], `${scenario.name} – ${outcome.tag} fits the contract`);
+      }
+      const actual = componentOutcome(outcome);
       eq(canonical(actual), canonical(oracleOutcome(model, log, scenario.command, args)), scenario.name);
       if (actual.published && actual.published.length) {
         eq(store.all().length, log.length + actual.published.length, `${scenario.name} – appended`);
@@ -153,14 +187,40 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
     eq(store.calls.append, 0, 'no append');
   });
 
-  check('an unloadable model and unknown commands are errors', () => {
+  check('an unloadable model, unknown commands and broken arguments say which they are', () => {
     let refused = null;
     try { decider.init('{}'); } catch (error) { refused = error.payload ?? error.message; }
     eq(typeof refused, 'string', 'init refused');
-    eq(handle('DefineCourse', {}).tag, 'error', 'nothing loaded');
+    eq(handle('DefineCourse', {}).tag, 'evaluation', 'nothing loaded');
     decider.init(JSON.stringify(envelope));
-    eq(handle('Nope', {}).tag, 'error', 'no such command');
-    eq(decider.handle('DefineCourse', '{').tag, 'error', 'no JSON');
+    eq(handle('Nope', {}).tag, 'invalid', 'no such command');
+    eq(decider.handle('DefineCourse', '{').tag, 'invalid', 'no JSON');
+    eq(decider.handle('DefineCourse', '[1]').tag, 'invalid', 'no object');
+    eq(handle('DefineCourse', {}).tag, 'evaluation', 'a required argument missing – the contract catches it first');
+  });
+
+  check('a failing store is a store outcome, at every call', () => {
+    decider.init(JSON.stringify(envelope));
+    for (const failing of ['read', 'append']) {
+      store.reset([], { failing });
+      eq(handle('DefineCourse', { courseId: 'c1', capacity: 1 }).tag, 'store', failing);
+    }
+  });
+
+  check('the contract names the model\'s types and refusals', () => {
+    decider.init(JSON.stringify(envelope));
+    const contract = JSON.parse(decider.contract());
+    eq([contract.openapi, contract.info.title], ['3.1.0', model.name], 'header');
+    eq(Object.keys(contract.paths).sort(), Object.keys(model['command-definitions']).map((c) => `/commands/${c}`).sort(),
+      'one path per command');
+    const define = contract.paths['/commands/DefineCourse'].post;
+    eq(define.requestBody.content['application/json'].schema.properties.courseId, { $ref: '#/components/schemas/CourseId' },
+      'arguments by type name');
+    eq(define.responses[422].content['application/json'].schema.properties.rejection.enum, ['Course already exists'],
+      'the refusals it can give');
+    const fits = contractValidator();
+    eq(fits('DefineCourse', 'request', { courseId: 'c1', capacity: 2, extra: 1 }).length > 0, true, 'closed');
+    eq(fits('DefineCourse', 'request', { courseId: 'c1', capacity: '2' }).length > 0, true, 'typed');
   });
 }
 

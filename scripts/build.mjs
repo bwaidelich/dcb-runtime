@@ -2,8 +2,9 @@
 //
 //   build/runtime.js        the playground's model.js and evaluate.js,
 //                           concatenated after src/shim.js and before
-//                           src/runtime.js – one module, one scope, as the
-//                           playground's own tests load them
+//                           src/contract.js and src/runtime.js – one
+//                           module, one scope, as the playground's own
+//                           tests load them
 //   build/dcb-runtime.wasm  the WebAssembly component (wit/runtime.wit)
 //   build/node/             the component transpiled for Node, its store
 //                           import mapped to hosts/node/memory-store.mjs
@@ -23,6 +24,7 @@ const sources = [
   'src/shim.js',
   'playground/app/model.js',
   'playground/app/evaluate.js',
+  'src/contract.js',
   'src/runtime.js',
 ];
 writeFileSync(at('build', 'runtime.js'),

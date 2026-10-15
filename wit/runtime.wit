@@ -40,7 +40,7 @@ interface store {
   use types.{query-item, event, sequenced-event, append-condition, append-error};
 
   /// The position of the last event in the store; none when it is empty.
-  head: func() -> option<u64>;
+  head: func() -> result<option<u64>, string>;
   read: func(query: list<query-item>) -> result<list<sequenced-event>, string>;
   /// Appends atomically; the position of the last event appended.
   append: func(events: list<event>, condition: option<append-condition>) -> result<u64, append-error>;
@@ -69,13 +69,23 @@ interface decider {
     rejected(rejected),
     /// Every attempt lost the race to a concurrent append.
     conflict,
-    /// The command could not be decided at all.
-    error(string),
+    /// The request does not name a command of the model, or its
+    /// arguments are no JSON object.
+    invalid(string),
+    /// The command could not be decided: the model is defective, or a
+    /// script threw.
+    evaluation(string),
+    /// The store failed.
+    store(string),
   }
 
   /// Loads a model from its JSON envelope (dcb-model.schema.json).
   init: func(model-json: string) -> result<_, string>;
   handle: func(command: string, args-json: string) -> outcome;
+  /// The loaded model's API, as an OpenAPI 3.1 document (JSON): one
+  /// operation per command, its arguments and published events typed
+  /// by the model's definitions.
+  contract: func() -> result<string, string>;
 }
 
 world runtime {

@@ -8,6 +8,7 @@
   "devDependencies": {
     "@bytecodealliance/componentize-js": "0.23.0",
     "@bytecodealliance/jco": "1.38.0",
-    "@bytecodealliance/preview2-shim": "0.29.0"
+    "@bytecodealliance/preview2-shim": "0.29.0",
+    "ajv": "8.20.0"
   }
 }
