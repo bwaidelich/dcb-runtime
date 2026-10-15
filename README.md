@@ -35,7 +35,7 @@ Experimental. The reasoning behind it is in the playground's
 ## The HTTP API
 
 ```
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store http://localhost:50051   # UmaDB
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store tephra://localhost:9000   # Tephra
 ```
 
@@ -113,7 +113,7 @@ model's generated contract.
 - `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store.rs` holds
   one adapter per event store, picked by the store URL's scheme and
   each behind a Cargo feature (`umadb`, `tephra`; both by default).
-  Another DCB store is another adapter: `head`, `read`, `append`, and
+  Another DCB store is another adapter under its own scheme: `head`, `read`, `append`, and
   its failed-condition error mapped to `Integrity`. Compiling the component to native code takes
   seconds, so the host keeps the result beside it
   (`dcb-runtime.wasm.cwasm`); later starts take a fraction of a second.

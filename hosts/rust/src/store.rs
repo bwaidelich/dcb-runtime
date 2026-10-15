@@ -1,8 +1,12 @@
 //! The event stores the host can connect the component's `store` import
 //! to, picked by the store URL's scheme:
 //!
-//!   http://… / https://…   UmaDB (gRPC)            feature `umadb`
+//!   umadb://host:port      UmaDB (gRPC)            feature `umadb`
+//!   umadb+tls://host:port  UmaDB over TLS
 //!   tephra://host:port     Tephra (TCP protocol)   feature `tephra`
+//!
+//! The scheme names the store, not the transport: two stores may well
+//! speak the same one.
 //!
 //! Each speaks the DCB specification's read and conditional append, so
 //! an adapter only translates shapes: the component's query items,
@@ -24,6 +28,18 @@ use wasmtime::{Result, format_err};
 
 use crate::component::dcb::runtime::types::{AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
 
+/// The schemes this build connects to, for the error that names none of them.
+fn schemes() -> String {
+    let mut known = Vec::new();
+    if cfg!(feature = "umadb") {
+        known.push("umadb:// or umadb+tls:// for UmaDB");
+    }
+    if cfg!(feature = "tephra") {
+        known.push("tephra:// for Tephra");
+    }
+    format!("use {}", known.join(", "))
+}
+
 pub struct EventStore {
     backend: Backend,
     timeout: Duration,
@@ -38,16 +54,18 @@ enum Backend {
 
 impl EventStore {
     pub async fn connect(url: &str, timeout: Duration) -> Result<Self> {
-        let scheme = url.split("://").next().unwrap_or_default();
+        let Some((scheme, address)) = url.split_once("://") else {
+            return Err(format_err!("not a store URL: {url} – {}", schemes()));
+        };
         let backend = async {
             match scheme {
                 #[cfg(feature = "umadb")]
-                "http" | "https" => Ok(Backend::Umadb(umadb::Umadb::connect(url).await?)),
+                "umadb" => Ok(Backend::Umadb(umadb::Umadb::connect(&format!("http://{address}")).await?)),
+                #[cfg(feature = "umadb")]
+                "umadb+tls" => Ok(Backend::Umadb(umadb::Umadb::connect(&format!("https://{address}")).await?)),
                 #[cfg(feature = "tephra")]
-                "tephra" => Ok(Backend::Tephra(tephra::Tephra::connect(&url["tephra://".len()..]).await?)),
-                _ => Err(format_err!(
-                    "no store this build connects to at {url} – http(s):// for UmaDB, tephra:// for Tephra"
-                )),
+                "tephra" => Ok(Backend::Tephra(tephra::Tephra::connect(address).await?)),
+                _ => Err(format_err!("no store this build connects to at {url} – {}", schemes())),
             }
         };
         let backend = tokio::time::timeout(timeout, backend)

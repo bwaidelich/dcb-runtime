@@ -29,8 +29,8 @@ struct Cli {
 struct Common {
     /// The model, as the playground exports it (JSON).
     model: String,
-    /// The event store: http(s)://host:port for UmaDB, tephra://host:port for Tephra.
-    #[arg(long, env = "DCB_STORE", default_value = "http://localhost:50051")]
+    /// The event store: umadb://host:port (or umadb+tls://) for UmaDB, tephra://host:port for Tephra.
+    #[arg(long, env = "DCB_STORE", default_value = "umadb://localhost:50051")]
     store: String,
     /// How long a call to the store may take before it counts as failed.
     #[arg(long, env = "DCB_STORE_TIMEOUT", default_value = "10s", value_parser = parse_duration)]

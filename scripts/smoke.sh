@@ -20,7 +20,7 @@ API="http://127.0.0.1:$HTTP_PORT"
 export DCB_STORE_TIMEOUT="${DCB_STORE_TIMEOUT:-3s}"
 
 case "${1:-}" in
-  umadb)  IMAGE=umadb/umadb:latest; PORT=50051; export DCB_STORE="http://localhost:$STORE_PORT" ;;
+  umadb)  IMAGE=umadb/umadb:latest; PORT=50051; export DCB_STORE="umadb://localhost:$STORE_PORT" ;;
   tephra) IMAGE=git.tqwewe.com/tephra/tephra:latest; PORT=9000; export DCB_STORE="tephra://localhost:$STORE_PORT" ;;
   *) echo "usage: $0 umadb|tephra" >&2; exit 2 ;;
 esac
