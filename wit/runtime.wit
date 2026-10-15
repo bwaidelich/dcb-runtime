@@ -1,0 +1,84 @@
+package dcb:runtime@0.1.0;
+
+/// The shapes both sides of the store port share – the DCB
+/// specification's, with payloads as JSON text: a model's events are
+/// whatever its definitions say, so nothing finer is typed here.
+interface types {
+  /// One item of a DCB query: an event matches when its type is one
+  /// of `types` and it carries every one of `tags`. Items are ORed.
+  record query-item {
+    types: list<string>,
+    tags: list<string>,
+  }
+
+  record event {
+    event-type: string,
+    /// The payload, as JSON.
+    data: string,
+    tags: list<string>,
+  }
+
+  record sequenced-event {
+    position: u64,
+    event: event,
+  }
+
+  record append-condition {
+    fail-if-events-match: list<query-item>,
+    after: option<u64>,
+  }
+
+  variant append-error {
+    /// The condition failed: a matching event was appended since.
+    integrity,
+    other(string),
+  }
+}
+
+/// A DCB event store, implemented by the host.
+interface store {
+  use types.{query-item, event, sequenced-event, append-condition, append-error};
+
+  /// The position of the last event in the store; none when it is empty.
+  head: func() -> option<u64>;
+  read: func(query: list<query-item>) -> result<list<sequenced-event>, string>;
+  /// Appends atomically; the position of the last event appended.
+  append: func(events: list<event>, condition: option<append-condition>) -> result<u64, append-error>;
+}
+
+/// A DCB Model, deciding commands against the store.
+interface decider {
+  use types.{event};
+
+  record published {
+    events: list<event>,
+    /// The position of the last event appended; none when the command
+    /// published nothing (every emission guarded out).
+    position: option<u64>,
+  }
+
+  record rejected {
+    /// The refusing rule's message, when it has one.
+    rejection: option<string>,
+    rule-index: u32,
+  }
+
+  variant outcome {
+    published(published),
+    /// The command's rules do not hold – an ordinary outcome.
+    rejected(rejected),
+    /// Every attempt lost the race to a concurrent append.
+    conflict,
+    /// The command could not be decided at all.
+    error(string),
+  }
+
+  /// Loads a model from its JSON envelope (dcb-model.schema.json).
+  init: func(model-json: string) -> result<_, string>;
+  handle: func(command: string, args-json: string) -> outcome;
+}
+
+world runtime {
+  import store;
+  export decider;
+}

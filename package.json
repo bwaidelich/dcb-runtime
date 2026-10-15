@@ -1,0 +1,13 @@
+{
+  "name": "dcb-runtime",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node test/conformance.mjs"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.38.0",
+    "@bytecodealliance/preview2-shim": "0.29.0"
+  }
+}
