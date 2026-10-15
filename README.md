@@ -31,6 +31,40 @@ Experimental. The reasoning behind it is in the playground's
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
 
+## The HTTP API
+
+```
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store http://localhost:50051
+```
+
+serves the model's commands at `http://127.0.0.1:8080`:
+
+- `POST /commands/{Command}` with the arguments as a JSON object;
+- `/openapi.json` – the contract, OpenAPI 3.1, generated from the model:
+  arguments and published events typed by the model's own types, the
+  refusals each command can give listed. Generate a client from it with
+  any OpenAPI generator;
+- `/docs` – Swagger UI over that contract, to try commands by hand
+  (embedded; `--no-docs` turns it off);
+- `/health` – whether the event store is serving.
+
+Requests are validated against the contract before anything is decided.
+
+| Status | Means |
+|---|---|
+| 200 | published: `{events, position}` |
+| 422 | rejected: `{rejection, ruleIndex}` |
+| 400 | the arguments do not fit the command |
+| 404 | the model has no such command |
+| 409 | every attempt lost the race to a concurrent append – retry |
+| 500 | the command could not be decided (defective model, throwing script) |
+| 503 | the event store failed |
+
+Failures are RFC 9457 problem details. The server keeps one instance of
+the component per command decided at once (`--instances`, default the
+number of CPUs, about 10 MB each). `run <model.json> <command> <args>`
+decides a single command instead and prints the response body.
+
 ## Build and test
 
 Needs Node 22+.
@@ -46,7 +80,7 @@ Against a real store – needs Docker and a Rust toolchain:
 
 ```
 cargo build --release --manifest-path hosts/rust/Cargo.toml
-scripts/smoke-umadb.sh   # a throwaway UmaDB container, driven through the Rust host
+scripts/smoke-umadb.sh   # a throwaway UmaDB container and the HTTP server, every status checked
 ```
 
 `npm test` runs every command scenario of the playground's shipped
@@ -54,23 +88,24 @@ models and fixtures through the component, against an in-memory store
 (`hosts/node/memory-store.mjs`), and compares each outcome with the
 playground's evaluator over the same events. It also pins the cycle:
 how often the store is asked, retries, conflicts, and that an event
-landing between two reads of a chained boundary is not lost.
+landing between two reads of a chained boundary is not lost. And it
+validates every scenario's arguments, and every response, against the
+model's generated contract.
 
 ## Layout
 
 - `wit/runtime.wit` – the component's world.
-- `src/runtime.js` – the decision cycle; `src/shim.js` – the in-memory
-  storage `model.js` keeps its own log in.
+- `src/runtime.js` – the decision cycle; `src/contract.js` – the
+  model's OpenAPI document; `src/shim.js` – the in-memory storage
+  `model.js` keeps its own log in.
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.
-- `hosts/rust/` – a host over UmaDB (wasmtime, `umadb-client`):
-  `dcb-runtime-host <model.json> <command> <args-json>` prints the
-  outcome as JSON. `UMADB_URL` names the store (default
-  `http://localhost:50051`), `DCB_RUNTIME_WASM` the component (default
-  `build/dcb-runtime.wasm`). Compiling the component to native code
-  takes seconds, so the host keeps the result beside it
-  (`dcb-runtime.wasm.cwasm`); later runs take a fraction of a second.
+- `hosts/rust/` – the HTTP host over UmaDB (axum, wasmtime,
+  `umadb-client`). Compiling the component to native code takes
+  seconds, so the host keeps the result beside it
+  (`dcb-runtime.wasm.cwasm`); later starts take a fraction of a second.
+  `assets/swagger-ui/` is swagger-ui-dist 5.32.15, unmodified.
 - `playground/` – the playground, as a pinned submodule.
 
 ## Status
@@ -82,9 +117,7 @@ landing between two reads of a chained boundary is not lost.
   plus all of `model.js`, including the predefined models and editing
   commands the runtime never uses.
 
-Next: a long-running host – the Rust one decides a single command per
-process – exposing commands over HTTP or a queue.
-
-Out of scope for now: a query port for projections, idempotent appends
-through the event `uuid`, reading an untagged projection whose handlers
-never read its state as `read(query, { backwards: true, limit: 1 })`.
+Out of scope for now: auth, a query port for projections, idempotent
+appends through the event `uuid`, metrics, reloading the model, reading
+an untagged projection whose handlers never read its state as
+`read(query, { backwards: true, limit: 1 })`.
