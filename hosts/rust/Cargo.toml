@@ -1,0 +1,10 @@
+[package]
+name = "dcb-runtime-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1.0.154"
+umadb-client = "0.7.8"
+umadb-dcb = "0.7.8"
+wasmtime = { version = "44.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }

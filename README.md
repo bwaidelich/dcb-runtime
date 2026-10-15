@@ -42,6 +42,13 @@ npm run build     # build/dcb-runtime.wasm and build/node/
 npm test          # conformance against the playground's own evaluator
 ```
 
+Against a real store – needs Docker and a Rust toolchain:
+
+```
+cargo build --release --manifest-path hosts/rust/Cargo.toml
+scripts/smoke-umadb.sh   # a throwaway UmaDB container, driven through the Rust host
+```
+
 `npm test` runs every command scenario of the playground's shipped
 models and fixtures through the component, against an in-memory store
 (`hosts/node/memory-store.mjs`), and compares each outcome with the
@@ -57,6 +64,13 @@ landing between two reads of a chained boundary is not lost.
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.
+- `hosts/rust/` – a host over UmaDB (wasmtime, `umadb-client`):
+  `dcb-runtime-host <model.json> <command> <args-json>` prints the
+  outcome as JSON. `UMADB_URL` names the store (default
+  `http://localhost:50051`), `DCB_RUNTIME_WASM` the component (default
+  `build/dcb-runtime.wasm`). Compiling the component to native code
+  takes seconds, so the host keeps the result beside it
+  (`dcb-runtime.wasm.cwasm`); later runs take a fraction of a second.
 - `playground/` – the playground, as a pinned submodule.
 
 ## Status
@@ -68,8 +82,8 @@ landing between two reads of a chained boundary is not lost.
   plus all of `model.js`, including the predefined models and editing
   commands the runtime never uses.
 
-Next: a Rust host (wasmtime) implementing `store` with the UmaDB
-client, and a smoke test against a running UmaDB.
+Next: a long-running host – the Rust one decides a single command per
+process – exposing commands over HTTP or a queue.
 
 Out of scope for now: a query port for projections, idempotent appends
 through the event `uuid`, reading an untagged projection whose handlers
