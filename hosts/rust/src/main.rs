@@ -38,9 +38,9 @@ struct Common {
     /// How long a call to the store may take before it counts as failed.
     #[arg(long, env = "DCB_STORE_TIMEOUT", default_value = "10s", value_parser = parse_duration)]
     store_timeout: std::time::Duration,
-    /// The runtime component.
-    #[arg(long, env = "DCB_RUNTIME_WASM", default_value = "build/dcb-runtime.wasm")]
-    wasm: String,
+    /// A runtime component to use instead of the one built into the host.
+    #[arg(long, env = "DCB_RUNTIME_WASM")]
+    wasm: Option<String>,
 }
 
 /// `500ms`, `10s` or `2m`.
@@ -90,7 +90,7 @@ enum Command {
 async fn pool(common: &Common, size: usize) -> Result<Pool> {
     let model = std::fs::read_to_string(&common.model).map_err(|e| format_err!("reading {}: {e}", common.model))?;
     let store = EventStore::connect(&common.store, common.store_timeout).await?;
-    Pool::new(&common.wasm, model, store, size).await
+    Pool::new(common.wasm.as_deref(), model, store, size).await
 }
 
 #[tokio::main]

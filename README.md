@@ -69,9 +69,8 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
      --api-token secret --data-directory-temporary --http-enabled --https-enabled=false   # EventSourcingDB
    ```
 
-5. **Serve the model** – from the repository root, since the host loads
-   `build/dcb-runtime.wasm` relative to it (`--wasm` or `DCB_RUNTIME_WASM`
-   to point elsewhere):
+5. **Serve the model** – the component is built into the host (`--wasm` or
+   `DCB_RUNTIME_WASM` to use another):
 
    ```
    hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051 --with-docs
@@ -229,9 +228,12 @@ model's generated contract.
   each behind a Cargo feature (`umadb`, `tephra`, `postgres`, `axonserver`,
   `eventsourcingdb`; all by default).
   Another DCB store is another adapter under its own scheme: `head`, `read`, `append`, and
-  its failed-condition error mapped to `Integrity`. Compiling the component to native code takes
-  seconds, so the host keeps the result beside it
-  (`dcb-runtime.wasm.cwasm`); later starts take a fraction of a second.
+  its failed-condition error mapped to `Integrity`. The host embeds
+  `build/dcb-runtime.wasm`, so `npm run build` comes first. Compiling the
+  component to native code takes seconds, so the host keeps the result in
+  the user's cache directory (`dcb-runtime/<hash>.cwasm`; beside the file,
+  as `<wasm>.cwasm`, for a `--wasm` component); later starts take a
+  fraction of a second.
   `assets/swagger-ui/` is swagger-ui-dist 5.32.15, unmodified.
 - `playground/` – the playground, as a pinned submodule.
 
