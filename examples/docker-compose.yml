@@ -1,5 +1,6 @@
 # The runtime over PostgreSQL, serving the playground's course-simple
-# fixture – Swagger UI at http://127.0.0.1:8080/docs.
+# fixture – Swagger UI at http://127.0.0.1:8080/docs, with /read and
+# /projections served.
 #
 #   docker compose -f examples/docker-compose.yml up
 #
@@ -11,6 +12,9 @@ services:
     environment:
       DCB_MODEL: https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json
       DCB_STORE: postgres://postgres:pw@postgres:5432/postgres
+      DCB_WITH_DOCS: "true"
+      DCB_WITH_READ: "true"
+      DCB_WITH_PROJECTIONS: "true"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
