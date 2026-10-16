@@ -2,8 +2,8 @@
 
 Runs a DCB Model, as authored in the
 [DCB Playground](https://github.com/dcb-events/dcb-playground), against a
-real DCB event store – [UmaDB](https://umadb.io) or
-[Tephra](https://tephra.tqwewe.com). One generic WebAssembly component takes any model
+real DCB event store – [UmaDB](https://umadb.io),
+[Tephra](https://tephra.tqwewe.com) or PostgreSQL. One generic WebAssembly component takes any model
 as data (its JSON envelope) and decides commands; the host connects it to
 a store.
 
@@ -32,11 +32,64 @@ Experimental. The reasoning behind it is in the playground's
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
 
+## Usage
+
+Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
+
+1. **Fetch the playground and build the component** – from the repository root:
+
+   ```
+   git submodule update --init
+   npm install
+   npm run build     # build/dcb-runtime.wasm
+   ```
+
+2. **Build the host:**
+
+   ```
+   cargo build --release --manifest-path hosts/rust/Cargo.toml
+   ```
+
+   The Tephra adapter needs `protoc` 35.1; without it, add
+   `--no-default-features --features umadb,postgres`.
+
+3. **Export the model** from the playground as JSON, e.g. `my-model.json`,
+   or use a fixture such as `playground/fixtures/course-simple.json`.
+
+4. **Start an event store**, e.g.:
+
+   ```
+   docker run --rm -d -p 50051:50051 umadb/umadb:latest                       # UmaDB
+   docker run --rm -d -p 9000:9000 git.tqwewe.com/tephra/tephra:latest        # Tephra
+   docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17        # PostgreSQL
+   ```
+
+5. **Serve the model** – from the repository root, since the host loads
+   `build/dcb-runtime.wasm` relative to it (`--wasm` or `DCB_RUNTIME_WASM`
+   to point elsewhere):
+
+   ```
+   hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051
+   ```
+
+   The first start compiles the component to native code, which takes a few
+   seconds; later starts are fast. Options (`--listen`, `--instances`,
+   `--store-timeout`, `--no-docs`) are listed by `--help`, and each can also be
+   set through an environment variable (`DCB_STORE`, `DCB_LISTEN`, …).
+
+6. **Call it** – try commands in Swagger UI at http://127.0.0.1:8080/docs, or:
+
+   ```
+   curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
+     -H 'content-type: application/json' -d '{"courseId":"c1","capacity":10}'
+   ```
+
 ## The HTTP API
 
 ```
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store tephra://localhost:9000   # Tephra
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store postgres://user:pw@localhost:5432/db   # PostgreSQL
 ```
 
 serves the model's commands at `http://127.0.0.1:8080`:
@@ -86,11 +139,18 @@ Against a real store – needs Docker and a Rust toolchain:
 cargo build --release --manifest-path hosts/rust/Cargo.toml
 scripts/smoke.sh umadb    # a throwaway store container and the HTTP server:
 scripts/smoke.sh tephra   # every status, and 40 requests racing for one seat
+scripts/smoke.sh postgres
 ```
 
 The Tephra client generates its protocol code at build time and needs
 `protoc` 35.1 exactly – on the `PATH`, or named by `PROTOC`. To build
-without it: `cargo build --release --no-default-features --features umadb`.
+without it: `cargo build --release --no-default-features --features umadb,postgres`.
+
+PostgreSQL is no DCB store of its own: the adapter keeps the events in a
+table `dcb_events`, created on connect when missing (a `search_path` in
+the URL, `?options=-csearch_path%3Dmy_schema`, puts it elsewhere), and
+checks the append condition under an advisory lock, so appends happen one
+at a time. Plain connections only for now; `sslmode=require` is refused.
 
 `npm test` runs every command scenario of the playground's shipped
 models and fixtures through the component, against an in-memory store
@@ -112,7 +172,7 @@ model's generated contract.
 - `hosts/node/` – the Node host's in-memory store.
 - `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store.rs` holds
   one adapter per event store, picked by the store URL's scheme and
-  each behind a Cargo feature (`umadb`, `tephra`; both by default).
+  each behind a Cargo feature (`umadb`, `tephra`, `postgres`; all by default).
   Another DCB store is another adapter under its own scheme: `head`, `read`, `append`, and
   its failed-condition error mapped to `Integrity`. Compiling the component to native code takes
   seconds, so the host keeps the result beside it
