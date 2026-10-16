@@ -34,6 +34,14 @@ Experimental. The reasoning behind it is in the playground's
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
 
+## Download
+
+Each [release](../../releases) carries the host, component included, for
+Linux (x86_64, aarch64) and macOS (Apple Silicon), with `SHA256SUMS`.
+Unpack it and continue at step 3 below – no Node or Rust needed. macOS
+refuses the unsigned binary when a browser downloaded it; `xattr -d
+com.apple.quarantine dcb-runtime-host` lets it run.
+
 ## Usage
 
 Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
@@ -213,6 +221,17 @@ how often the store is asked, retries, conflicts, and that an event
 landing between two reads of a chained boundary is not lost. And it
 validates every scenario's arguments, and every response, against the
 model's generated contract.
+
+## Release
+
+CI (`.github/workflows/ci.yml`) runs the conformance tests and builds the
+host on every push to `main` and every pull request. A tag `vX.Y.Z` –
+matching `version` in `hosts/rust/Cargo.toml` – builds the hosts and
+publishes them as a GitHub release (`.github/workflows/release.yml`):
+
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## Layout
 

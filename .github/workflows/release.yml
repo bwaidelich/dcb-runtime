@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  PROTOC_VERSION: "35.1"
+
+jobs:
+  component:
+    name: Component and conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Check the tag against the host's version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' hosts/rust/Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match hosts/rust/Cargo.toml version $version"
+            exit 1
+          fi
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: component
+          path: build/dcb-runtime.wasm
+          if-no-files-found: error
+
+  host:
+    name: Host (${{ matrix.target }})
+    needs: component
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04 for its older glibc, so the binary runs on more distributions.
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+            protoc: linux-x86_64
+          - target: linux-aarch64
+            runner: ubuntu-22.04-arm
+            protoc: linux-aarch_64
+          - target: macos-aarch64
+            runner: macos-15
+            protoc: osx-aarch_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: component
+          path: build
+      - name: Install protoc ${{ env.PROTOC_VERSION }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/protoc.zip" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v$PROTOC_VERSION/protoc-$PROTOC_VERSION-${{ matrix.protoc }}.zip"
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release
+        working-directory: hosts/rust
+      - name: Package
+        run: |
+          name="dcb-runtime-host-${GITHUB_REF_NAME#v}-${{ matrix.target }}"
+          mkdir -p "dist/$name/swagger-ui"
+          cp hosts/rust/target/release/dcb-runtime-host README.md LICENSE "dist/$name/"
+          cp hosts/rust/assets/swagger-ui/LICENSE hosts/rust/assets/swagger-ui/NOTICE "dist/$name/swagger-ui/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: host
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: host-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
