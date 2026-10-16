@@ -74,12 +74,12 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
    to point elsewhere):
 
    ```
-   hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051
+   hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051 --with-docs
    ```
 
    The first start compiles the component to native code, which takes a few
    seconds; later starts are fast. Options (`--listen`, `--instances`,
-   `--store-timeout`, `--no-docs`) are listed by `--help`, and each can also be
+   `--store-timeout`, `--with-docs`, `--with-read`) are listed by `--help`, and each can also be
    set through an environment variable (`DCB_STORE`, `DCB_LISTEN`, …).
 
 6. **Call it** – try commands in Swagger UI at http://127.0.0.1:8080/docs, or:
@@ -107,7 +107,9 @@ serves the model's commands at `http://127.0.0.1:8080`:
   refusals each command can give listed. Generate a client from it with
   any OpenAPI generator;
 - `/docs` – Swagger UI over that contract, to try commands by hand
-  (embedded; `--no-docs` turns it off);
+  (embedded; only with `--with-docs`);
+- `POST /read` – the events matching a DCB query, a page at a time (only
+  with `--with-read`; see below);
 - `/health` – whether the event store is serving.
 
 Requests are validated against the contract before anything is decided.
@@ -129,6 +131,30 @@ the component per command decided at once (`--instances`, default the
 number of CPUs, about 10 MB each). `run <model.dcb.json> <command> <args>`
 decides a single command instead and prints the response body.
 
+### Reading events
+
+`POST /read` takes a DCB query as its body – `{"items": [{"types": […],
+"tags": […]}]}`, items ORed, an item matching an event of one of its
+types (any, when left out) carrying all its tags; no body, or `{}`, reads
+every event – and pages with URL parameters:
+
+- `after` – exclusive: forwards, the events after this position;
+  backwards, those before it;
+- `limit` – the most events a page holds, 1 to 1000, default 100;
+- `backwards` – `true` for newest first.
+
+```
+curl -X POST 'http://127.0.0.1:8080/read?limit=2' \
+  -H 'content-type: application/json' -d '{"items":[{"tags":["CourseId:c1"]}]}'
+```
+
+answers `{"events": [{"position", "type", "data", "tags"}, …], "next"}`;
+`next` is the position to pass as `after` for the following page, `null`
+on a page short of the limit – a full last page is followed by an empty
+one. 400 for an invalid query or parameter, 501 when the store cannot
+read that way (Axon Server reads forwards only), 503 when it failed.
+It exposes every event in the store, so it is off unless asked for.
+
 ## Build and test
 
 Needs Node 22+.
@@ -140,12 +166,12 @@ npm run build     # build/dcb-runtime.wasm and build/node/
 npm test          # conformance against the playground's own evaluator
 ```
 
-Against a real store – needs Docker and a Rust toolchain:
+Against a real store – needs Docker, jq and a Rust toolchain:
 
 ```
 cargo build --release --manifest-path hosts/rust/Cargo.toml
 scripts/smoke.sh umadb    # a throwaway store container and the HTTP server:
-scripts/smoke.sh tephra   # every status, and 40 requests racing for one seat
+scripts/smoke.sh tephra   # every status, paging through /read, and 40 requests racing for one seat
 scripts/smoke.sh postgres
 scripts/smoke.sh axonserver
 scripts/smoke.sh eventsourcingdb
@@ -166,8 +192,9 @@ Axon Server needs a DCB context: the standalone server's
 DCB enabled. The URL's path names it – `default` when there is none – and
 its user is the access token, when access control is on:
 `axonserver://token@host:8124/my-context`. A tag `key:value` becomes Axon's
-tag of that key and value, as Axon Framework writes them. Axon Server
-needs a licence beyond a 12-hour trial. Its client is generated from the
+tag of that key and value, as Axon Framework writes them. The events Axon
+sources carry no tags, so `/read` returns them with `tags: []`, and it
+reads forwards only. Axon Server needs a licence beyond a 12-hour trial. Its client is generated from the
 vendored `hosts/rust/proto/axonserver/` at build time, without `protoc`.
 
 EventSourcingDB knows no tags and wants event types in reverse-domain

@@ -28,6 +28,10 @@
 //! keeps the events in a table of its own and checks the condition
 //! itself.
 //!
+//! Reads take `ReadOptions` – a cursor, a limit, a direction – passed
+//! down to the store where it has them. Axon Server reads forwards only:
+//! a backwards read there is refused (`unsupported`), not emulated.
+//!
 //! Every call is bounded by a timeout. A store that went away does not
 //! always say so – a client may wait on a connection nobody will answer
 //! – and a request waiting forever is worse than a 503.
@@ -61,6 +65,25 @@ fn schemes() -> String {
         known.push("eventsourcingdb:// or eventsourcingdb+tls:// for EventSourcingDB");
     }
     format!("use {}", known.join(", "))
+}
+
+/// Where a read starts, which way it goes and how much it returns. The
+/// default reads every matching event, oldest first – what the
+/// component asks for.
+#[derive(Clone, Copy, Default)]
+pub struct ReadOptions {
+    /// Exclusive: forwards, the events after this position; backwards,
+    /// those before it.
+    pub after: Option<u64>,
+    pub limit: Option<u64>,
+    /// Newest first.
+    pub backwards: bool,
+}
+
+/// The query matching every event: one item naming no types and no tags.
+#[cfg(any(feature = "postgres", feature = "eventsourcingdb"))]
+fn everything() -> Vec<QueryItem> {
+    vec![QueryItem { types: Vec::new(), tags: Vec::new() }]
 }
 
 pub struct EventStore {
@@ -141,19 +164,35 @@ impl EventStore {
         self.bounded("head", call, |m| m).await
     }
 
-    pub async fn read(&self, query: Vec<QueryItem>) -> std::result::Result<Vec<SequencedEvent>, String> {
+    /// Why this store cannot read with `options`; none when it can.
+    pub fn unsupported(&self, options: &ReadOptions) -> Option<String> {
+        match &self.backend {
+            #[cfg(feature = "axonserver")]
+            Backend::AxonServer(_) if options.backwards => Some("Axon Server reads forwards only.".into()),
+            _ => {
+                let _ = options;
+                None
+            }
+        }
+    }
+
+    /// The events matching `query` – every event when there is none.
+    pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> std::result::Result<Vec<SequencedEvent>, String> {
+        if let Some(reason) = self.unsupported(&options) {
+            return Err(reason);
+        }
         let call = async {
             match &self.backend {
                 #[cfg(feature = "umadb")]
-                Backend::Umadb(store) => store.read(query).await,
+                Backend::Umadb(store) => store.read(query, options).await,
                 #[cfg(feature = "tephra")]
-                Backend::Tephra(store) => store.read(query).await,
+                Backend::Tephra(store) => store.read(query, options).await,
                 #[cfg(feature = "postgres")]
-                Backend::Postgres(store) => store.read(query).await,
+                Backend::Postgres(store) => store.read(query, options).await,
                 #[cfg(feature = "axonserver")]
-                Backend::AxonServer(store) => store.read(query).await,
+                Backend::AxonServer(store) => store.read(query, options).await,
                 #[cfg(feature = "eventsourcingdb")]
-                Backend::EventSourcingDb(store) => store.read(query).await,
+                Backend::EventSourcingDb(store) => store.read(query, options).await,
             }
         };
         self.bounded("read", call, |m| m).await
@@ -210,7 +249,7 @@ mod umadb {
     use umadb_dcb::{DcbAppendCondition, DcbError, DcbEvent, DcbEventStoreAsync, DcbQuery, DcbQueryItem};
     use wasmtime::{Result, format_err};
 
-    use super::{AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+    use super::{AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent};
 
     pub struct Umadb(AsyncUmaDbClient);
 
@@ -232,10 +271,18 @@ mod umadb {
             self.0.head().await.map_err(|e| e.to_string())
         }
 
-        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
+        pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
+            let limit = options.limit.map(|limit| u32::try_from(limit).unwrap_or(u32::MAX));
+            // UmaDB starts at the position it is given; positions start at 1.
+            let start = match options.after {
+                Some(after) if options.backwards && after <= 1 => return Ok(Vec::new()),
+                Some(after) if options.backwards => Some(after - 1),
+                Some(after) => Some(after + 1),
+                None => None,
+            };
             let (events, _) = self
                 .0
-                .read_with_head(Some(query_of(query)), None, false, None)
+                .read_with_head(query.map(query_of), start, options.backwards, limit)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(events
@@ -289,7 +336,7 @@ mod tephra {
     };
     use wasmtime::{Result, format_err};
 
-    use super::{AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+    use super::{AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent};
 
     pub struct Tephra(AsyncClient);
 
@@ -326,12 +373,19 @@ mod tephra {
             Ok((stats.event_count > 0).then_some(stats.event_count))
         }
 
-        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
-            let (events, _) = self
-                .0
-                .read_all(query_of(query)?, Position::ZERO, None)
-                .await
-                .map_err(|e| e.to_string())?;
+        pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
+            let query = match query {
+                Some(items) => query_of(items)?,
+                None => Query::all(),
+            };
+            let read = if options.backwards {
+                // Nothing to start before is the tip.
+                let before = options.after.map_or(Position::MAX, Position::new);
+                self.0.read_all_back(query, before, options.limit).await
+            } else {
+                self.0.read_all(query, Position::new(options.after.unwrap_or(0)), options.limit).await
+            };
+            let (events, _) = read.map_err(|e| e.to_string())?;
             Ok(events
                 .into_iter()
                 .map(|sequenced| {
@@ -393,7 +447,7 @@ mod postgres {
     use tokio_postgres::{Config, NoTls};
     use wasmtime::{Result, format_err};
 
-    use super::{AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+    use super::{AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent, everything};
 
     /// The advisory lock appends take – "dcb_evts" in ASCII. Stores in
     /// other schemas of the same database share it: they wait for one
@@ -473,12 +527,24 @@ mod postgres {
             Ok(row.get::<_, Option<i64>>(0).map(|p| p as u64))
         }
 
-        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
+        pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
             let mut params = Params::new();
-            let condition = matching(query, &mut params);
+            let mut condition = format!("({})", matching(query.unwrap_or_else(everything), &mut params));
+            if let Some(after) = options.after {
+                params.push(Box::new(after as i64));
+                condition += &format!(" AND position {} ${}", if options.backwards { "<" } else { ">" }, params.len());
+            }
+            let mut sql = format!(
+                "SELECT position, type, data, tags FROM dcb_events WHERE {condition} ORDER BY position{}",
+                if options.backwards { " DESC" } else { "" }
+            );
+            if let Some(limit) = options.limit {
+                params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
+                sql += &format!(" LIMIT ${}", params.len());
+            }
             let client = self.0.get().await.map_err(|e| e.to_string())?;
             let rows = client
-                .query(&format!("SELECT position, type, data, tags FROM dcb_events WHERE {condition} ORDER BY position"), &refs(&params))
+                .query(&sql, &refs(&params))
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(rows
@@ -580,6 +646,9 @@ impl<'a> Address<'a> {
 /// events Axon sources carry no tags – their tags are a call per event
 /// away – so a read returns events without them: the component folds
 /// types and data only.
+///
+/// Axon sources forwards only, so a backwards read is refused; a limit
+/// stops taking events from the stream, which cancels the rest.
 #[cfg(feature = "axonserver")]
 mod axonserver {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -591,7 +660,7 @@ mod axonserver {
     use tonic::{Code, Request, Status};
     use wasmtime::{Result, format_err};
 
-    use super::{Address, AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+    use super::{Address, AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent};
 
     /// The generated code refers across packages by relative paths, so
     /// the modules nest as the packages do. Of `common.proto` only what
@@ -686,15 +755,22 @@ mod axonserver {
             Ok((head > 0).then_some(head as u64))
         }
 
-        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
-            // No items match nothing; Axon's empty criteria would match all.
-            if query.is_empty() {
-                return Ok(Vec::new());
-            }
-            let request = SourceEventsRequest { from_sequence: 0, criterion: criteria_of(query) };
+        /// Backwards reads are refused before they get here.
+        pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
+            // No items match nothing; Axon's empty criteria match all.
+            let criterion = match query {
+                Some(items) if items.is_empty() => return Ok(Vec::new()),
+                Some(items) => criteria_of(items),
+                None => Vec::new(),
+            };
+            // The events after a position start at its sequence.
+            let request = SourceEventsRequest { from_sequence: options.after.unwrap_or(0) as i64, criterion };
             let mut stream = self.0.clone().source(request).await.map_err(text)?.into_inner();
+            let limit = options.limit.map_or(usize::MAX, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
             let mut events = Vec::new();
-            while let Some(response) = stream.message().await.map_err(text)? {
+            while events.len() < limit
+                && let Some(response) = stream.message().await.map_err(text)?
+            {
                 if let Some(Sourced::Event(proto::SequencedEvent { sequence, event: Some(event) })) = response.result {
                     events.push(SequencedEvent {
                         position: sequence as u64 + 1,
@@ -774,7 +850,7 @@ mod eventsourcingdb {
     use serde_json::{Value, json};
     use wasmtime::{Result, format_err};
 
-    use super::{Address, AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+    use super::{Address, AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent, everything};
 
     /// The `source` of the events written: the CloudEvents attribute
     /// naming who wrote them.
@@ -881,11 +957,21 @@ mod eventsourcingdb {
             }
         }
 
-        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
+        pub async fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
+            let query = query.unwrap_or_else(everything);
             if query.is_empty() {
                 return Ok(Vec::new());
             }
-            let eventql = format!("FROM e IN events WHERE {} ORDER BY e.id PROJECT INTO e", self.matching(query));
+            // Position p is id p - 1: after it are the ids from p on,
+            // before it those below p - 1.
+            let after = match options.after {
+                Some(after) if options.backwards => format!("(e.id AS INT) < {} AND ", after.saturating_sub(1)),
+                Some(after) => format!("(e.id AS INT) >= {after} AND "),
+                None => String::new(),
+            };
+            let order = if options.backwards { " DESC" } else { "" };
+            let top = options.limit.map(|limit| format!(" TOP {limit}")).unwrap_or_default();
+            let eventql = format!("FROM e IN events WHERE {after}{} ORDER BY e.id{order}{top} PROJECT INTO e", self.matching(query));
             let response = self.post("run-eventql-query", json!({"query": eventql})).await?;
             if !response.status().is_success() {
                 return Err(Self::failure(response).await);

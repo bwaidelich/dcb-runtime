@@ -25,7 +25,7 @@ pub use dcb::runtime::types::Event;
 pub use exports::dcb::runtime::decider::Outcome;
 use dcb::runtime::types::{AppendCondition, AppendError, QueryItem, SequencedEvent};
 
-use crate::store::EventStore;
+use crate::store::{EventStore, ReadOptions};
 
 pub struct Host {
     store: Arc<EventStore>,
@@ -39,7 +39,7 @@ impl dcb::runtime::store::Host for Host {
     }
 
     async fn read(&mut self, query: Vec<QueryItem>) -> Result<std::result::Result<Vec<SequencedEvent>, String>> {
-        Ok(self.store.read(query).await)
+        Ok(self.store.read(Some(query), ReadOptions::default()).await)
     }
 
     async fn append(

@@ -69,9 +69,12 @@ enum Command {
         /// of the component. Defaults to the number of CPUs.
         #[arg(long, env = "DCB_INSTANCES")]
         instances: Option<usize>,
-        /// Do not serve Swagger UI at /docs.
-        #[arg(long, env = "DCB_NO_DOCS")]
-        no_docs: bool,
+        /// Serve Swagger UI at /docs.
+        #[arg(long, env = "DCB_WITH_DOCS")]
+        with_docs: bool,
+        /// Serve POST /read: the events matching a DCB query, a page at a time.
+        #[arg(long, env = "DCB_WITH_READ")]
+        with_read: bool,
     },
     /// Decide one command and print the outcome as JSON.
     Run {
@@ -93,12 +96,12 @@ async fn pool(common: &Common, size: usize) -> Result<Pool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Serve { common, listen, instances, no_docs } => {
+        Command::Serve { common, listen, instances, with_docs, with_read } => {
             let size = instances.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-            let api = Arc::new(http::Api::new(pool(&common, size).await?).await?);
+            let api = Arc::new(http::Api::new(pool(&common, size).await?, with_read).await?);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
-            eprintln!("serving {} on http://{listen}{}", common.model, if no_docs { "" } else { " (docs at /docs)" });
-            axum::serve(listener, http::router(api, !no_docs))
+            eprintln!("serving {} on http://{listen}{}", common.model, if with_docs { " (docs at /docs)" } else { "" });
+            axum::serve(listener, http::router(api, with_docs))
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
                 })

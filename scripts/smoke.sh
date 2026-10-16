@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Smoke test against a real event store: starts a throwaway container of
 # it and the HTTP server over the playground's course-simple fixture, and
-# checks each status the API answers with.
+# checks each status the API answers with, and paging through /read.
 #
 #   scripts/smoke.sh umadb|tephra|postgres|axonserver|eventsourcingdb
 #
-# Needs Docker, curl, `npm run build`, and `cargo build --release` in
+# Needs Docker, curl, jq, `npm run build`, and `cargo build --release` in
 # hosts/rust.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -46,12 +46,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 2>/dev/null &
+"$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null &
 server=$!
 for _ in $(seq 1 100); do
   curl -sf "$API/health" >/dev/null 2>&1 && break
   # The server gives up when the store does not answer yet; try again.
-  kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 2>/dev/null & server=$!; }
+  kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null & server=$!; }
   sleep 0.2
 done
 
@@ -60,6 +60,18 @@ expect() {
   local want="$1" what="$2" got
   shift 2
   got="$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$@" || true)"
+  if [[ "$got" == "$want" ]]; then
+    echo "  ✓ $what → $want"
+  else
+    echo "  ✗ $what: expected $want, got $got"; failures=$((failures + 1))
+  fi
+}
+
+# The positions a read returns, and its `next`: "1,2 next=null".
+page() {
+  local want="$1" what="$2" got
+  shift 2
+  got="$(curl -s --max-time 20 -X POST "$@" | jq -r '"\([.events[].position] | join(",")) next=\(.next)"' 2>/dev/null || true)"
   if [[ "$got" == "$want" ]]; then
     echo "  ✓ $what → $want"
   else
@@ -78,6 +90,39 @@ expect 400 'no JSON' -X POST "$API/commands/DefineCourse" -H 'content-type: appl
 expect 404 'no such command' -X POST "$API/commands/Nope" -H 'content-type: application/json' -d '{}'
 expect 200 'subscribe s1' -X POST "$API/commands/SubscribeStudentToCourse" -H 'content-type: application/json' -d '{"courseId":"c1","studentId":"s1"}'
 expect 422 'subscribe s2, course full' -X POST "$API/commands/SubscribeStudentToCourse" -H 'content-type: application/json' -d '{"courseId":"c1","studentId":"s2"}'
+
+# The store now holds CourseDefined c1 at 1, StudentSubscribedToCourse s1 at 2.
+if curl -s "$API/openapi.json" | jq -e '.paths["/read"].post' >/dev/null; then
+  echo "  ✓ contract describes /read"
+else
+  echo "  ✗ contract does not describe /read"; failures=$((failures + 1))
+fi
+page '1,2 next=null' 'read all' "$API/read"
+page '1,2 next=null' 'read all, {}' "$API/read" -H 'content-type: application/json' -d '{}'
+page '1 next=1' 'read a page' "$API/read?limit=1"
+page '2 next=2' 'read the next page' "$API/read?limit=1&after=1"
+page ' next=null' 'read past the end' "$API/read?after=2"
+page '2 next=null' 'read by type' "$API/read" -H 'content-type: application/json' -d '{"items":[{"types":["StudentSubscribedToCourse"]}]}'
+page '2 next=null' 'read by tags' "$API/read" -H 'content-type: application/json' -d '{"items":[{"tags":["CourseId:c1","StudentId:s1"]}]}'
+page '1,2 next=null' 'read by items, ORed' "$API/read" -H 'content-type: application/json' \
+  -d '{"items":[{"types":["CourseDefined"],"tags":["CourseId:c1"]},{"types":["StudentSubscribedToCourse"]}]}'
+if [[ "$1" == axonserver ]]; then
+  expect 501 'read backwards' -X POST "$API/read?backwards=true"
+else
+  page '2,1 next=null' 'read backwards' "$API/read?backwards=true"
+  page '2 next=2' 'read backwards, a page' "$API/read?backwards=true&limit=1"
+  page '1 next=1' 'read backwards, the next page' "$API/read?backwards=true&limit=1&after=2"
+  page ' next=null' 'read backwards past the start' "$API/read?backwards=true&after=1"
+fi
+expect 400 'read, limit 0' -X POST "$API/read?limit=0"
+expect 400 'read, limit too high' -X POST "$API/read?limit=1001"
+expect 400 'read, after no position' -X POST "$API/read?after=x"
+expect 400 'read, backwards no boolean' -X POST "$API/read?backwards=yes"
+expect 400 'read, an unknown parameter' -X POST "$API/read?from=1"
+expect 400 'read, no items' -X POST "$API/read" -H 'content-type: application/json' -d '{"items":[]}'
+expect 400 'read, an empty item' -X POST "$API/read" -H 'content-type: application/json' -d '{"items":[{}]}'
+expect 400 'read, empty types' -X POST "$API/read" -H 'content-type: application/json' -d '{"items":[{"types":[]}]}'
+expect 400 'read, no JSON' -X POST "$API/read" -H 'content-type: application/json' -d '{'
 
 # A race for the last seat: the append condition must let exactly one
 # subscription through; the others are refused (422) or, having lost
@@ -103,6 +148,7 @@ fi
 
 docker rm -f "$NAME" >/dev/null
 expect 503 'health, store gone' "$API/health"
+expect 503 'read, store gone' -X POST "$API/read"
 expect 503 'define, store gone' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c4","capacity":1}'
 
 [[ $failures -eq 0 ]] && echo "all passed" || { echo "$failures failed"; exit 1; }
