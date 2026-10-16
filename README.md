@@ -30,6 +30,7 @@ Experimental. The reasoning behind it is in the playground's
 
   A failed append condition reruns the whole cycle, up to three times,
   then reports `conflict`.
+
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
 
@@ -111,15 +112,15 @@ serves the model's commands at `http://127.0.0.1:8080`:
 
 Requests are validated against the contract before anything is decided.
 
-| Status | Means |
-|---|---|
-| 200 | published: `{events, position}` |
-| 422 | rejected: `{rejection}`, one of the command's rejection messages |
-| 400 | the arguments do not fit the command |
-| 404 | the model has no such command |
-| 409 | every attempt lost the race to a concurrent append – retry |
-| 500 | the command could not be decided (defective model, throwing script) |
-| 503 | the event store failed |
+| Status | Means                                                               |
+| ------ | ------------------------------------------------------------------- |
+| 200    | published: `{events, position}`                                     |
+| 422    | rejected: `{rejection}`, one of the command's rejection messages    |
+| 400    | the arguments do not fit the command                                |
+| 404    | the model has no such command                                       |
+| 409    | every attempt lost the race to a concurrent append – retry          |
+| 500    | the command could not be decided (defective model, throwing script) |
+| 503    | the event store failed                                              |
 
 Failures are RFC 9457 problem details. Every call to the store is
 bounded (`--store-timeout`, default 10s): a store that went away is a
