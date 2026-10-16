@@ -1,22 +1,291 @@
 # DCB Runtime
 
-Runs a DCB Model, as authored in the
-[DCB Playground](https://github.com/dcb-events/dcb-playground), against a
-real DCB event store – [UmaDB](https://umadb.io),
-[Tephra](https://tephra.tqwewe.com), [Axon Server](https://www.axoniq.io/server),
-[EventSourcingDB](https://www.eventsourcingdb.io) or PostgreSQL. One generic WebAssembly component takes any model
-as data (its JSON envelope) and decides commands; the host connects it to
-a store.
+**Turn a DCB Model into a running command API – backed by a real event store.**
 
-Experimental. The reasoning behind it is in the playground's
-`docs/research/2026-10-15-dcb-runtime-wasm.md`.
+Design your model in the [DCB Playground](https://github.com/dcb-events/dcb-playground),
+export it, and serve it: every command becomes an HTTP endpoint with an
+OpenAPI contract, decided against PostgreSQL,
+[Axon Server](https://www.axoniq.io/server),
+[EventSourcingDB](https://www.eventsourcingdb.io),
+[Tephra](https://tephra.tqwewe.com) or [UmaDB](https://umadb.io).
+
+- **One binary, any model** – a generic WebAssembly component takes the
+  model as data; no code generation, no glue code.
+- **Same semantics as the playground** – the component _is_ the
+  playground's evaluator, so the runtime cannot disagree with it.
+- **Consistency built in** – DCB append conditions, automatic retries
+  on concurrent writes, typed rejections.
+
+> [!NOTE]
+> Experimental. The reasoning behind it is in the playground's
+> `docs/research/2026-10-15-dcb-runtime-wasm.md`.
+
+## Quick start
+
+**1. Get the host.** Download it from the [releases](../../releases) –
+Linux (x86_64, aarch64) and macOS (Apple Silicon), with `SHA256SUMS` –
+and unpack it. No Node or Rust needed.
+
+> [!TIP]
+> macOS refuses the unsigned binary when a browser downloaded it:
+> `xattr -d com.apple.quarantine dcb-runtime-host` lets it run.
+
+<details>
+<summary><b>Or build it from source</b></summary>
+
+Needs Node 22+ and a Rust toolchain. From the repository root:
+
+```bash
+git submodule update --init
+npm install
+npm run build     # build/dcb-runtime.wasm
+cargo build --release --manifest-path hosts/rust/Cargo.toml
+```
+
+The binary lands in `hosts/rust/target/release/dcb-runtime-host`.
+
+The Tephra adapter needs `protoc` 35.1 exactly – on the `PATH`, or named
+by `PROTOC`. Without it, leave Tephra out:
+
+```bash
+cargo build --release --manifest-path hosts/rust/Cargo.toml \
+  --no-default-features --features umadb,postgres,axonserver,eventsourcingdb
+```
+
+</details>
+
+**2. Get a model.** Export one from the playground as a `.dcb.json` file,
+or take a fixture:
+
+```bash
+curl -LO https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json
+```
+
+**3. Start an event store and serve the model** – pick one from
+[Event stores](#event-stores) below, e.g. PostgreSQL:
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17
+./dcb-runtime-host serve course-simple.dcb.json \
+  --store postgres://postgres:pw@localhost:5432/postgres --with-docs
+```
+
+The first start compiles the component to native code, which takes a few
+seconds; later starts are fast.
+
+**4. Call it** – try commands in Swagger UI at http://127.0.0.1:8080/docs, or:
+
+```bash
+curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
+  -H 'content-type: application/json' -d '{"courseId":"c1","capacity":10}'
+```
+
+<details>
+<summary><b>All options</b></summary>
+
+| Option            | Environment variable | Default                   |                                                       |
+| ----------------- | -------------------- | ------------------------- | ----------------------------------------------------- |
+| `--store`         | `DCB_STORE`          | `umadb://localhost:50051` | the event store, see below                            |
+| `--listen`        | `DCB_LISTEN`         | `127.0.0.1:8080`          | the address to listen on                              |
+| `--instances`     | `DCB_INSTANCES`      | number of CPUs            | commands decided at once, about 10 MB each            |
+| `--store-timeout` | `DCB_STORE_TIMEOUT`  | `10s`                     | how long a store call may take before it is a failure |
+| `--with-docs`     | `DCB_WITH_DOCS`      | off                       | serve Swagger UI at `/docs`                           |
+| `--with-read`     | `DCB_WITH_READ`      | off                       | serve [`POST /read`](#reading-events)                 |
+| `--wasm`          | `DCB_RUNTIME_WASM`   | built in                  | another runtime component to use                      |
+
+`dcb-runtime-host run <model.dcb.json> <command> <args>` decides a single
+command instead of serving, and prints the response body.
+
+</details>
+
+## Event stores
+
+The store is picked by the scheme of the `--store` URL. Every adapter is
+behind a Cargo feature of the same name, all enabled by default.
+
+### PostgreSQL
+
+No DCB store of its own: the adapter keeps the events in a table
+`dcb_events`, created on connect when missing, and checks the append
+condition under an advisory lock, so appends happen one at a time.
+
+```bash
+--store postgres://user:pw@host:5432/db
+```
+
+<details>
+<summary><b>Example: PostgreSQL with Docker</b></summary>
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17
+dcb-runtime-host serve course-simple.dcb.json \
+  --store postgres://postgres:pw@localhost:5432/postgres --with-docs
+```
+
+</details>
+
+- A `search_path` in the URL puts the table elsewhere:
+  `?options=-csearch_path%3Dmy_schema`.
+- Plain connections only for now; `sslmode=require` is refused.
+
+### Axon Server
+
+```bash
+--store axonserver://[token@]host:8124[/context]    # axonserver+tls:// for TLS
+```
+
+<details>
+<summary><b>Example: Axon Server with Docker</b></summary>
+
+```bash
+docker run --rm -d -p 8124:8124 -e AXONIQ_AXONSERVER_STANDALONE_DCB=true axoniq/axonserver:latest
+dcb-runtime-host serve course-simple.dcb.json \
+  --store axonserver://localhost:8124 --with-docs
+```
+
+</details>
+
+- Needs a DCB context: the standalone server's
+  (`AXONIQ_AXONSERVER_STANDALONE_DCB=true`, as above), or one created
+  with DCB enabled. The URL's path names it – `default` when there is
+  none – and its user is the access token, when access control is on.
+- A tag `key:value` becomes Axon's tag of that key and value, as Axon
+  Framework writes them. The events Axon sources carry no tags, so
+  `/read` returns them with `tags: []`, and it reads forwards only.
+- Needs a licence beyond a 12-hour trial.
+- The client is generated from the vendored `hosts/rust/proto/axonserver/`
+  at build time, without `protoc`.
+
+### EventSourcingDB
+
+```bash
+--store eventsourcingdb://token@host:3000[/subject][?type-prefix=…]    # eventsourcingdb+tls:// for HTTPS
+```
+
+<details>
+<summary><b>Example: EventSourcingDB with Docker</b></summary>
+
+```bash
+docker run --rm -d -p 3000:3000 thenativeweb/eventsourcingdb:latest run \
+  --api-token secret --data-directory-temporary --http-enabled --https-enabled=false
+dcb-runtime-host serve course-simple.dcb.json \
+  --store eventsourcingdb://secret@localhost:3000 --with-docs
+```
+
+</details>
+
+- EventSourcingDB knows no tags and wants event types in reverse-domain
+  notation. The adapter writes each event under the type
+  `<prefix>.<EventName>` (prefix `dcb.runtime`, or the URL's
+  `type-prefix`), with data `{"payload": …, "tags": […]}`, to one subject
+  (the URL's path, `/` when there is none).
+- It reads, and checks the append condition, with EventQL over the
+  events of that subject and prefix, e.g.
+  `eventsourcingdb://secret@host:3000/courses?type-prefix=com.example.courses`.
+- Without a licence it stores up to 25,000 events.
+
+### Tephra
+
+```bash
+--store tephra://host:9000
+```
+
+<details>
+<summary><b>Example: Tephra with Docker</b></summary>
+
+```bash
+docker run --rm -d -p 9000:9000 git.tqwewe.com/tephra/tephra:latest
+dcb-runtime-host serve course-simple.dcb.json \
+  --store tephra://localhost:9000 --with-docs
+```
+
+</details>
+
+- The client generates its protocol code at build time and needs `protoc`
+  35.1 exactly (see [building from source](#quick-start)).
+
+### UmaDB
+
+The default store.
+
+```bash
+--store umadb://host:50051    # umadb+tls:// for TLS
+```
+
+<details>
+<summary><b>Example: UmaDB with Docker</b></summary>
+
+```bash
+docker run --rm -d -p 50051:50051 umadb/umadb:latest
+dcb-runtime-host serve course-simple.dcb.json \
+  --store umadb://localhost:50051 --with-docs
+```
+
+</details>
+
+## The HTTP API
+
+The server answers at `http://127.0.0.1:8080`:
+
+| Endpoint                   |                                                                                                                                                                                           |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /commands/{Command}` | decide a command; the arguments as a JSON object                                                                                                                                       |
+| `GET /openapi.json`        | the contract, OpenAPI 3.1, generated from the model: arguments and published events typed by the model's own types, the refusals each command can give listed. Generate a client from it |
+| `GET /docs`                | Swagger UI over that contract (embedded; only with `--with-docs`)                                                                                                                         |
+| `POST /read`               | the events matching a DCB query, a page at a time (only with `--with-read`; [see below](#reading-events))                                                                                 |
+| `GET /health`              | whether the event store is serving                                                                                                                                                        |
+
+Requests are validated against the contract before anything is decided.
+
+| Status | Means                                                               |
+| ------ | ------------------------------------------------------------------- |
+| 200    | published: `{events, position}`                                     |
+| 422    | rejected: `{rejection}`, one of the command's rejection messages    |
+| 400    | the arguments do not fit the command                                |
+| 404    | the model has no such command                                       |
+| 409    | every attempt lost the race to a concurrent append – retry          |
+| 500    | the command could not be decided (defective model, throwing script) |
+| 503    | the event store failed                                              |
+
+Failures are RFC 9457 problem details. Every call to the store is
+bounded (`--store-timeout`): a store that went away is a 503, not a
+request that waits forever.
+
+### Reading events
+
+`POST /read` takes a DCB query as its body – `{"items": [{"types": […],
+"tags": […]}]}`, items ORed, an item matching an event of one of its
+types (any, when left out) carrying all its tags; no body, or `{}`, reads
+every event – and pages with URL parameters:
+
+- `after` – exclusive: forwards, the events after this position;
+  backwards, those before it;
+- `limit` – the most events a page holds, 1 to 1000, default 100;
+- `backwards` – `true` for newest first.
+
+<details>
+<summary><b>Example: reading a course's events</b></summary>
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/read?limit=2' \
+  -H 'content-type: application/json' -d '{"items":[{"tags":["CourseId:c1"]}]}'
+```
+
+</details>
+
+It answers `{"events": [{"position", "type", "data", "tags"}, …], "next"}`;
+`next` is the position to pass as `after` for the following page, `null`
+on a page short of the limit – a full last page is followed by an empty
+one. 400 for an invalid query or parameter, 501 when the store cannot
+read that way (Axon Server reads forwards only), 503 when it failed.
+It exposes every event in the store, so it is off unless asked for.
 
 ## How it works
 
 - **The playground decides.** The component is the playground's
   `model.js` and `evaluate.js`, unchanged, plus `src/runtime.js` – the
   cycle around a decision. There is no second implementation of the
-  semantics, so the runtime cannot disagree with the playground.
+  semantics.
 - **Ports** (`wit/runtime.wit`):
   - exports `decider`: `init(model-json)`, `handle(command, args-json)`
     → `published | rejected | conflict | error`;
@@ -34,184 +303,18 @@ Experimental. The reasoning behind it is in the playground's
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
 
-## Download
+## Development
 
-Each [release](../../releases) carries the host, component included, for
-Linux (x86_64, aarch64) and macOS (Apple Silicon), with `SHA256SUMS`.
-Unpack it and continue at step 3 below – no Node or Rust needed. macOS
-refuses the unsigned binary when a browser downloaded it; `xattr -d
-com.apple.quarantine dcb-runtime-host` lets it run.
-
-## Usage
-
-Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
-
-1. **Fetch the playground and build the component** – from the repository root:
-
-   ```
-   git submodule update --init
-   npm install
-   npm run build     # build/dcb-runtime.wasm
-   ```
-
-2. **Build the host:**
-
-   ```
-   cargo build --release --manifest-path hosts/rust/Cargo.toml
-   ```
-
-   The Tephra adapter needs `protoc` 35.1; without it, add
-   `--no-default-features --features umadb,postgres,axonserver,eventsourcingdb`.
-
-3. **Export the model** from the playground as a `.dcb.json` file, or use a
-   fixture such as `playground/fixtures/course-simple.dcb.json`.
-
-4. **Start an event store**, e.g.:
-
-   ```
-   docker run --rm -d -p 50051:50051 umadb/umadb:latest                       # UmaDB
-   docker run --rm -d -p 9000:9000 git.tqwewe.com/tephra/tephra:latest        # Tephra
-   docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17        # PostgreSQL
-   docker run --rm -d -p 8124:8124 -e AXONIQ_AXONSERVER_STANDALONE_DCB=true axoniq/axonserver:latest   # Axon Server
-   docker run --rm -d -p 3000:3000 thenativeweb/eventsourcingdb:latest run \
-     --api-token secret --data-directory-temporary --http-enabled --https-enabled=false   # EventSourcingDB
-   ```
-
-5. **Serve the model** – the component is built into the host (`--wasm` or
-   `DCB_RUNTIME_WASM` to use another):
-
-   ```
-   hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051 --with-docs
-   ```
-
-   The first start compiles the component to native code, which takes a few
-   seconds; later starts are fast. Options (`--listen`, `--instances`,
-   `--store-timeout`, `--with-docs`, `--with-read`) are listed by `--help`, and each can also be
-   set through an environment variable (`DCB_STORE`, `DCB_LISTEN`, …).
-
-6. **Call it** – try commands in Swagger UI at http://127.0.0.1:8080/docs, or:
-
-   ```
-   curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
-     -H 'content-type: application/json' -d '{"courseId":"c1","capacity":10}'
-   ```
-
-## The HTTP API
-
-```
-hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
-hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store tephra://localhost:9000   # Tephra
-hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store postgres://user:pw@localhost:5432/db   # PostgreSQL
-hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store axonserver://localhost:8124   # Axon Server (axonserver+tls:// for TLS)
-hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store eventsourcingdb://secret@localhost:3000   # EventSourcingDB (eventsourcingdb+tls:// for HTTPS)
-```
-
-serves the model's commands at `http://127.0.0.1:8080`:
-
-- `POST /commands/{Command}` with the arguments as a JSON object;
-- `/openapi.json` – the contract, OpenAPI 3.1, generated from the model:
-  arguments and published events typed by the model's own types, the
-  refusals each command can give listed. Generate a client from it with
-  any OpenAPI generator;
-- `/docs` – Swagger UI over that contract, to try commands by hand
-  (embedded; only with `--with-docs`);
-- `POST /read` – the events matching a DCB query, a page at a time (only
-  with `--with-read`; see below);
-- `/health` – whether the event store is serving.
-
-Requests are validated against the contract before anything is decided.
-
-| Status | Means                                                               |
-| ------ | ------------------------------------------------------------------- |
-| 200    | published: `{events, position}`                                     |
-| 422    | rejected: `{rejection}`, one of the command's rejection messages    |
-| 400    | the arguments do not fit the command                                |
-| 404    | the model has no such command                                       |
-| 409    | every attempt lost the race to a concurrent append – retry          |
-| 500    | the command could not be decided (defective model, throwing script) |
-| 503    | the event store failed                                              |
-
-Failures are RFC 9457 problem details. Every call to the store is
-bounded (`--store-timeout`, default 10s): a store that went away is a
-503, not a request that waits forever. The server keeps one instance of
-the component per command decided at once (`--instances`, default the
-number of CPUs, about 10 MB each). `run <model.dcb.json> <command> <args>`
-decides a single command instead and prints the response body.
-
-### Reading events
-
-`POST /read` takes a DCB query as its body – `{"items": [{"types": […],
-"tags": […]}]}`, items ORed, an item matching an event of one of its
-types (any, when left out) carrying all its tags; no body, or `{}`, reads
-every event – and pages with URL parameters:
-
-- `after` – exclusive: forwards, the events after this position;
-  backwards, those before it;
-- `limit` – the most events a page holds, 1 to 1000, default 100;
-- `backwards` – `true` for newest first.
-
-```
-curl -X POST 'http://127.0.0.1:8080/read?limit=2' \
-  -H 'content-type: application/json' -d '{"items":[{"tags":["CourseId:c1"]}]}'
-```
-
-answers `{"events": [{"position", "type", "data", "tags"}, …], "next"}`;
-`next` is the position to pass as `after` for the following page, `null`
-on a page short of the limit – a full last page is followed by an empty
-one. 400 for an invalid query or parameter, 501 when the store cannot
-read that way (Axon Server reads forwards only), 503 when it failed.
-It exposes every event in the store, so it is off unless asked for.
-
-## Build and test
+### Build and test
 
 Needs Node 22+.
 
-```
+```bash
 git submodule update --init
 npm install
 npm run build     # build/dcb-runtime.wasm and build/node/
 npm test          # conformance against the playground's own evaluator
 ```
-
-Against a real store – needs Docker, jq and a Rust toolchain:
-
-```
-cargo build --release --manifest-path hosts/rust/Cargo.toml
-scripts/smoke.sh umadb    # a throwaway store container and the HTTP server:
-scripts/smoke.sh tephra   # every status, paging through /read, and 40 requests racing for one seat
-scripts/smoke.sh postgres
-scripts/smoke.sh axonserver
-scripts/smoke.sh eventsourcingdb
-```
-
-The Tephra client generates its protocol code at build time and needs
-`protoc` 35.1 exactly – on the `PATH`, or named by `PROTOC`. To build
-without it: `cargo build --release --no-default-features --features umadb,postgres,axonserver,eventsourcingdb`.
-
-PostgreSQL is no DCB store of its own: the adapter keeps the events in a
-table `dcb_events`, created on connect when missing (a `search_path` in
-the URL, `?options=-csearch_path%3Dmy_schema`, puts it elsewhere), and
-checks the append condition under an advisory lock, so appends happen one
-at a time. Plain connections only for now; `sslmode=require` is refused.
-
-Axon Server needs a DCB context: the standalone server's
-(`AXONIQ_AXONSERVER_STANDALONE_DCB=true`, as above), or one created with
-DCB enabled. The URL's path names it – `default` when there is none – and
-its user is the access token, when access control is on:
-`axonserver://token@host:8124/my-context`. A tag `key:value` becomes Axon's
-tag of that key and value, as Axon Framework writes them. The events Axon
-sources carry no tags, so `/read` returns them with `tags: []`, and it
-reads forwards only. Axon Server needs a licence beyond a 12-hour trial. Its client is generated from the
-vendored `hosts/rust/proto/axonserver/` at build time, without `protoc`.
-
-EventSourcingDB knows no tags and wants event types in reverse-domain
-notation. The adapter writes each event under the type
-`<prefix>.<EventName>` (prefix `dcb.runtime`, or the URL's `type-prefix`),
-with data `{"payload": …, "tags": […]}`, to one subject (the URL's path,
-`/` when there is none). It reads, and checks the append condition, with
-EventQL over the events of that subject and prefix:
-`eventsourcingdb://secret@host:3000/courses?type-prefix=com.example.courses`.
-Without a licence it stores up to 25,000 events.
 
 `npm test` runs every command scenario of the playground's shipped
 models and fixtures through the component, against an in-memory store
@@ -222,18 +325,36 @@ landing between two reads of a chained boundary is not lost. And it
 validates every scenario's arguments, and every response, against the
 model's generated contract.
 
-## Release
+<details>
+<summary><b>Smoke tests against real stores</b></summary>
+
+Needs Docker, jq and a Rust toolchain. Each run starts a throwaway store
+container and the HTTP server, and checks every status, paging through
+`/read`, and 40 requests racing for one seat:
+
+```bash
+cargo build --release --manifest-path hosts/rust/Cargo.toml
+scripts/smoke.sh postgres
+scripts/smoke.sh axonserver
+scripts/smoke.sh eventsourcingdb
+scripts/smoke.sh tephra
+scripts/smoke.sh umadb
+```
+
+</details>
+
+### Release
 
 CI (`.github/workflows/ci.yml`) runs the conformance tests and builds the
 host on every push to `main` and every pull request. A tag `vX.Y.Z` –
 matching `version` in `hosts/rust/Cargo.toml` – builds the hosts and
 publishes them as a GitHub release (`.github/workflows/release.yml`):
 
-```
+```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-## Layout
+### Layout
 
 - `wit/runtime.wit` – the component's world.
 - `src/runtime.js` – the decision cycle; `src/contract.js` – the
@@ -267,3 +388,7 @@ Out of scope for now: auth, a query port for projections, idempotent
 appends through the event `uuid`, metrics, reloading the model, reading
 an untagged projection whose handlers never read its state as
 `read(query, { backwards: true, limit: 1 })`.
+
+## License
+
+[MIT](LICENSE)
