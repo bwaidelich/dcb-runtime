@@ -436,8 +436,10 @@ publishes them as a GitHub release (`.github/workflows/release.yml`), and
 the Linux ones as the image `ghcr.io/bwaidelich/dcb-runtime` (`Dockerfile`),
 after the Compose smoke test passed against it:
 
+`make release` bumps that version, commits, tags and pushes:
+
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+make release VERSION=0.3.0
 ```
 
 ### Layout
