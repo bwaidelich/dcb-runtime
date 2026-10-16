@@ -13,6 +13,8 @@
 //!   eventsourcingdb://token@host:port[/subject][?type-prefix=com.example]
 //!                          EventSourcingDB (HTTP)  feature `eventsourcingdb`
 //!   eventsourcingdb+tls://…  EventSourcingDB over HTTPS
+//!   memory://              in this process, gone when it ends – to try
+//!                          a model out, never for real data
 //!
 //! The scheme names the store, not the transport: two stores may well
 //! speak the same one.
@@ -26,7 +28,7 @@
 //! append: its adapter keeps the tags in the event's data and writes the
 //! condition as that query. PostgreSQL knows nothing of DCB: its adapter
 //! keeps the events in a table of its own and checks the condition
-//! itself.
+//! itself, as does the in-memory store.
 //!
 //! Reads take `ReadOptions` – a cursor, a limit, a direction – passed
 //! down to the store where it has them. Axon Server reads forwards only:
@@ -35,9 +37,6 @@
 //! Every call is bounded by a timeout. A store that went away does not
 //! always say so – a client may wait on a connection nobody will answer
 //! – and a request waiting forever is worse than a 503.
-
-#[cfg(not(any(feature = "umadb", feature = "tephra", feature = "postgres", feature = "axonserver", feature = "eventsourcingdb")))]
-compile_error!("enable at least one event store: feature `umadb`, `tephra`, `postgres`, `axonserver` or `eventsourcingdb`");
 
 use std::future::Future;
 use std::time::Duration;
@@ -64,6 +63,7 @@ fn schemes() -> String {
     if cfg!(feature = "eventsourcingdb") {
         known.push("eventsourcingdb:// or eventsourcingdb+tls:// for EventSourcingDB");
     }
+    known.push("memory:// to try a model out");
     format!("use {}", known.join(", "))
 }
 
@@ -81,7 +81,6 @@ pub struct ReadOptions {
 }
 
 /// The query matching every event: one item naming no types and no tags.
-#[cfg(any(feature = "postgres", feature = "eventsourcingdb"))]
 fn everything() -> Vec<QueryItem> {
     vec![QueryItem { types: Vec::new(), tags: Vec::new() }]
 }
@@ -92,6 +91,7 @@ pub struct EventStore {
 }
 
 enum Backend {
+    Memory(memory::Memory),
     #[cfg(feature = "umadb")]
     Umadb(umadb::Umadb),
     #[cfg(feature = "tephra")]
@@ -109,11 +109,12 @@ impl EventStore {
         let Some((scheme, address)) = url.split_once("://") else {
             return Err(format_err!("not a store URL: {url} – {}", schemes()));
         };
-        // PostgreSQL takes the whole URL.
+        // PostgreSQL takes the whole URL; the in-memory store needs none.
         #[cfg(not(any(feature = "umadb", feature = "tephra", feature = "axonserver", feature = "eventsourcingdb")))]
         let _ = address;
         let backend = async {
             match scheme {
+                "memory" => Ok(Backend::Memory(memory::Memory::default())),
                 #[cfg(feature = "umadb")]
                 "umadb" => Ok(Backend::Umadb(umadb::Umadb::connect(&format!("http://{address}")).await?)),
                 #[cfg(feature = "umadb")]
@@ -149,6 +150,7 @@ impl EventStore {
     pub async fn head(&self) -> std::result::Result<Option<u64>, String> {
         let call = async {
             match &self.backend {
+                Backend::Memory(store) => store.head(),
                 #[cfg(feature = "umadb")]
                 Backend::Umadb(store) => store.head().await,
                 #[cfg(feature = "tephra")]
@@ -183,6 +185,7 @@ impl EventStore {
         }
         let call = async {
             match &self.backend {
+                Backend::Memory(store) => store.read(query, options),
                 #[cfg(feature = "umadb")]
                 Backend::Umadb(store) => store.read(query, options).await,
                 #[cfg(feature = "tephra")]
@@ -208,6 +211,7 @@ impl EventStore {
     ) -> std::result::Result<u64, AppendError> {
         let call = async {
             match &self.backend {
+                Backend::Memory(store) => store.append(events, condition),
                 #[cfg(feature = "umadb")]
                 Backend::Umadb(store) => store.append(events, condition).await,
                 #[cfg(feature = "tephra")]
@@ -227,6 +231,7 @@ impl EventStore {
     pub async fn health(&self) -> std::result::Result<(), String> {
         let call = async {
             match &self.backend {
+                Backend::Memory(store) => store.health(),
                 #[cfg(feature = "umadb")]
                 Backend::Umadb(store) => store.health().await,
                 #[cfg(feature = "tephra")]
@@ -240,6 +245,72 @@ impl EventStore {
             }
         };
         self.bounded("health", call, |m| m).await
+    }
+}
+
+/// The events in a vector, behind a lock: a store to try a model out
+/// with, nothing to start first. Gone when the process ends.
+mod memory {
+    use std::sync::Mutex;
+
+    use super::{AppendCondition, AppendError, Event, QueryItem, ReadOptions, SequencedEvent, everything};
+
+    #[derive(Default)]
+    pub struct Memory(Mutex<Vec<Event>>);
+
+    /// An item matches an event of one of its types (any, when it names
+    /// none) carrying all its tags; no items match nothing.
+    fn matches(items: &[QueryItem], event: &Event) -> bool {
+        items.iter().any(|item| {
+            (item.types.is_empty() || item.types.contains(&event.event_type))
+                && item.tags.iter().all(|tag| event.tags.contains(tag))
+        })
+    }
+
+    impl Memory {
+        /// Positions start at 1: the event at index i is at position i + 1.
+        pub fn head(&self) -> Result<Option<u64>, String> {
+            let events = self.0.lock().map_err(|e| e.to_string())?;
+            Ok((!events.is_empty()).then_some(events.len() as u64))
+        }
+
+        pub fn read(&self, query: Option<Vec<QueryItem>>, options: ReadOptions) -> Result<Vec<SequencedEvent>, String> {
+            let query = query.unwrap_or_else(everything);
+            let events = self.0.lock().map_err(|e| e.to_string())?;
+            let sequenced = events.iter().enumerate().map(|(i, event)| (i as u64 + 1, event));
+            let in_range = |position: u64| match options.after {
+                Some(after) if options.backwards => position < after,
+                Some(after) => position > after,
+                None => true,
+            };
+            let limit = options.limit.map_or(usize::MAX, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
+            let pick = |(position, event): (u64, &Event)| {
+                (in_range(position) && matches(&query, event))
+                    .then(|| SequencedEvent { position, event: event.clone() })
+            };
+            Ok(if options.backwards {
+                sequenced.rev().filter_map(pick).take(limit).collect()
+            } else {
+                sequenced.filter_map(pick).take(limit).collect()
+            })
+        }
+
+        pub fn append(&self, events: Vec<Event>, condition: Option<AppendCondition>) -> Result<u64, AppendError> {
+            let mut stored = self.0.lock().map_err(|e| AppendError::Other(e.to_string()))?;
+            if let Some(condition) = condition {
+                // No `after` is the whole log.
+                let after = usize::try_from(condition.after.unwrap_or(0)).unwrap_or(usize::MAX);
+                if stored.iter().skip(after).any(|event| matches(&condition.fail_if_events_match, event)) {
+                    return Err(AppendError::Integrity);
+                }
+            }
+            stored.extend(events);
+            Ok(stored.len() as u64)
+        }
+
+        pub fn health(&self) -> Result<(), String> {
+            Ok(())
+        }
     }
 }
 

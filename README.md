@@ -20,7 +20,38 @@ OpenAPI contract, decided against PostgreSQL,
 - **Consistency built in** – DCB append conditions, automatic retries
   on concurrent writes, typed rejections.
 
+## Not a public API
+
+> [!CAUTION]
+> This API is the core of your application – where commands are decided –
+> not its edge. It knows nothing of users, sessions, authentication,
+> authorization, rate limits, untrusted input or presentation: those
+> belong to your application's adapters – a web UI, a public REST or
+> GraphQL API, a message consumer – which call this API over a private
+> network, in the sense of
+> [ports and adapters](https://alistair.cockburn.us/hexagonal-architecture/).
+> **Never expose it directly.**
+
+The host says so on start when it listens beyond the machine it runs on,
+and so does the contract – at the top of Swagger UI.
+
 ## Quick start
+
+### With Docker
+
+Nothing to install but Docker – the model fetched by URL, the events
+kept in memory:
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 ghcr.io/bwaidelich/dcb-runtime \
+  serve https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json --store memory://
+```
+
+Then try commands in Swagger UI at http://127.0.0.1:8080/docs. The events
+are gone when the container stops; for a real store, see
+[Docker](#docker).
+
+### With the binary
 
 **1. Get the host.** Download it from the [releases](../../releases) –
 Linux (x86_64, aarch64) and macOS (Apple Silicon), with `SHA256SUMS` –
@@ -55,7 +86,8 @@ cargo build --release --manifest-path hosts/rust/Cargo.toml \
 </details>
 
 **2. Get a model.** Export one from the playground as a `.dcb.json` file,
-or take a fixture:
+or take a fixture – or pass its `https://` URL to `serve` instead of a
+file:
 
 ```bash
 curl -LO https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json
@@ -93,15 +125,45 @@ curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
 | `--with-read`     | `DCB_WITH_READ`      | off                       | serve [`POST /read`](#reading-events)                 |
 | `--wasm`          | `DCB_RUNTIME_WASM`   | built in                  | another runtime component to use                      |
 
+The model is a file or an `http(s)://` URL, fetched once on start; for
+`serve`, `DCB_MODEL` names it, too.
+
 `dcb-runtime-host run <model.dcb.json> <command> <args>` decides a single
 command instead of serving, and prints the response body.
 
 </details>
 
+## Docker
+
+The image `ghcr.io/bwaidelich/dcb-runtime` – Linux, amd64 and arm64,
+tagged `X.Y.Z`, `X.Y` and `latest` – holds the host and runs `serve` by
+default, configured by the [environment variables](#quick-start) above.
+It sets:
+
+- `DCB_LISTEN=0.0.0.0:8080`, to be reachable from outside the container;
+- `DCB_WITH_DOCS=true`, Swagger UI at `/docs`;
+- `XDG_CACHE_HOME=/cache`: the first start of a container compiles the
+  component, which takes a few seconds; a volume there keeps the result
+  (`-v dcb-cache:/cache`).
+
+Publish the port on `127.0.0.1` (`-p 127.0.0.1:8080:8080`), not on every
+interface as `-p 8080:8080` does – see [Not a public API](#not-a-public-api).
+
+`localhost` inside the container is the container, not your machine: a
+store running on your machine is at `host.docker.internal` (Docker
+Desktop; on Linux add `--add-host=host.docker.internal:host-gateway`), or
+run both with Compose. `examples/docker-compose.yml` serves the
+course-simple fixture over PostgreSQL:
+
+```bash
+docker compose -f examples/docker-compose.yml up
+```
+
 ## Event stores
 
 The store is picked by the scheme of the `--store` URL. Every adapter is
-behind a Cargo feature of the same name, all enabled by default.
+behind a Cargo feature of the same name, all enabled by default – except
+the in-memory one, always built in.
 
 ### PostgreSQL
 
@@ -203,6 +265,15 @@ dcb-runtime-host serve course-simple.dcb.json \
 
 - The client generates its protocol code at build time and needs `protoc`
   35.1 exactly (see [building from source](#quick-start)).
+
+### In memory
+
+```bash
+--store memory://
+```
+
+Events kept in the host's memory, gone when it stops – to try a model out,
+nothing to start first. Never for real data. Always built in.
 
 ### UmaDB
 
@@ -339,7 +410,12 @@ scripts/smoke.sh axonserver
 scripts/smoke.sh eventsourcingdb
 scripts/smoke.sh tephra
 scripts/smoke.sh umadb
+scripts/smoke.sh memory
 ```
+
+`scripts/smoke.sh compose` runs the same checks against
+`examples/docker-compose.yml`, with the image `DCB_IMAGE` names
+(the published one by default).
 
 </details>
 
@@ -348,7 +424,9 @@ scripts/smoke.sh umadb
 CI (`.github/workflows/ci.yml`) runs the conformance tests and builds the
 host on every push to `main` and every pull request. A tag `vX.Y.Z` –
 matching `version` in `hosts/rust/Cargo.toml` – builds the hosts and
-publishes them as a GitHub release (`.github/workflows/release.yml`):
+publishes them as a GitHub release (`.github/workflows/release.yml`), and
+the Linux ones as the image `ghcr.io/bwaidelich/dcb-runtime` (`Dockerfile`),
+after the Compose smoke test passed against it:
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
@@ -375,6 +453,9 @@ git tag v0.1.0 && git push origin v0.1.0
   as `<wasm>.cwasm`, for a `--wasm` component); later starts take a
   fraction of a second.
   `assets/swagger-ui/` is swagger-ui-dist 5.32.15, unmodified.
+- `Dockerfile` – the image, from the release's prebuilt Linux hosts in
+  `dist/amd64/` and `dist/arm64/`; `examples/docker-compose.yml` – the
+  runtime over PostgreSQL.
 - `playground/` – the playground, as a pinned submodule.
 
 ## Status

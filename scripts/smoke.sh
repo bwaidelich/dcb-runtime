@@ -3,7 +3,12 @@
 # it and the HTTP server over the playground's course-simple fixture, and
 # checks each status the API answers with, and paging through /read.
 #
-#   scripts/smoke.sh umadb|tephra|postgres|axonserver|eventsourcingdb
+#   scripts/smoke.sh umadb|tephra|postgres|axonserver|eventsourcingdb|memory
+#   scripts/smoke.sh compose
+#
+# `memory` needs no container. `compose` runs examples/docker-compose.yml
+# instead of the host built here – the image named by DCB_IMAGE, the
+# published one by default – with the model it fetches by URL.
 #
 # Needs Docker, curl, jq, `npm run build`, and `cargo build --release` in
 # hosts/rust.
@@ -34,26 +39,55 @@ case "${1:-}" in
     IMAGE=thenativeweb/eventsourcingdb:latest; PORT=3000
     IMAGE_ARGS=(run --api-token smoke --data-directory-temporary --http-enabled --https-enabled=false)
     export DCB_STORE="eventsourcingdb://smoke@localhost:$STORE_PORT" ;;
-  *) echo "usage: $0 umadb|tephra|postgres|axonserver|eventsourcingdb" >&2; exit 2 ;;
+  memory) IMAGE=""; export DCB_STORE="memory://" ;;
+  compose) IMAGE="${DCB_IMAGE:-ghcr.io/bwaidelich/dcb-runtime:latest}" ;;
+  *) echo "usage: $0 umadb|tephra|postgres|axonserver|eventsourcingdb|memory|compose" >&2; exit 2 ;;
 esac
-echo "$1 ($IMAGE)"
+echo "$1 (${IMAGE:-in memory})"
 
-docker run --rm -d --name "$NAME" --publish "$STORE_PORT:$PORT" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} "$IMAGE" ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} >/dev/null
 server=""
+OVERRIDE=""
 cleanup() {
   [[ -n "$server" ]] && kill "$server" 2>/dev/null || true
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [[ -n "$OVERRIDE" ]]; then
+    docker compose -p "$NAME" -f examples/docker-compose.yml -f "$OVERRIDE" down -v >/dev/null 2>&1 || true
+    rm -f "$OVERRIDE"
+  else
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-"$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null &
-server=$!
-for _ in $(seq 1 100); do
-  curl -sf "$API/health" >/dev/null 2>&1 && break
-  # The server gives up when the store does not answer yet; try again.
-  kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null & server=$!; }
-  sleep 0.2
-done
+if [[ "$1" == compose ]]; then
+  OVERRIDE="$(mktemp)"
+  cat >"$OVERRIDE" <<YAML
+services:
+  runtime:
+    image: $IMAGE
+    environment:
+      DCB_INSTANCES: "8"
+      DCB_WITH_READ: "true"
+    ports: !override
+      - "127.0.0.1:$HTTP_PORT:8080"
+YAML
+  compose() { docker compose -p "$NAME" -f examples/docker-compose.yml -f "$OVERRIDE" "$@"; }
+  compose up -d --quiet-pull >/dev/null 2>&1
+  # The image compiles the component on its first start.
+  for _ in $(seq 1 300); do
+    curl -sf "$API/health" >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+else
+  [[ -n "$IMAGE" ]] && docker run --rm -d --name "$NAME" --publish "$STORE_PORT:$PORT" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} "$IMAGE" ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} >/dev/null
+  "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null &
+  server=$!
+  for _ in $(seq 1 100); do
+    curl -sf "$API/health" >/dev/null 2>&1 && break
+    # The server gives up when the store does not answer yet; try again.
+    kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null & server=$!; }
+    sleep 0.2
+  done
+fi
 
 failures=0
 expect() {
@@ -140,15 +174,19 @@ else
   echo "  ✗ 40 racing for one seat: $(sort <<<"$statuses" | uniq -c | tr -s ' ' | paste -sd, -)"; failures=$((failures + 1))
 fi
 
-if out="$("$HOST" run "$MODEL" DefineCourse '{"courseId":"c3","capacity":1}')" && [[ "$out" == *'"position"'* ]]; then
-  echo "  ✓ run → published"
-else
-  echo "  ✗ run: $out"; failures=$((failures + 1))
+if [[ "$1" != compose ]]; then
+  if out="$("$HOST" run "$MODEL" DefineCourse '{"courseId":"c3","capacity":1}')" && [[ "$out" == *'"position"'* ]]; then
+    echo "  ✓ run → published"
+  else
+    echo "  ✗ run: $out"; failures=$((failures + 1))
+  fi
 fi
 
-docker rm -f "$NAME" >/dev/null
-expect 503 'health, store gone' "$API/health"
-expect 503 'read, store gone' -X POST "$API/read"
-expect 503 'define, store gone' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c4","capacity":1}'
+if [[ "$1" != memory ]]; then
+  if [[ "$1" == compose ]]; then compose stop postgres >/dev/null 2>&1; else docker rm -f "$NAME" >/dev/null; fi
+  expect 503 'health, store gone' "$API/health"
+  expect 503 'read, store gone' -X POST "$API/read"
+  expect 503 'define, store gone' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c4","capacity":1}'
+fi
 
 [[ $failures -eq 0 ]] && echo "all passed" || { echo "$failures failed"; exit 1; }

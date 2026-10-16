@@ -138,7 +138,15 @@ function buildContract(model) {
     info: {
       title: model.name || 'DCB Model',
       version: contractHash(JSON.stringify(definitionsToSchema(model))),
-      description: 'Commands of a DCB Model, decided against a DCB event store.',
+      description: [
+        'Commands of a DCB Model, decided against a DCB event store.',
+        '',
+        '**⚠️ Not a public API.** This API is the core of your application – where commands are decided –'
+        + ' not its edge. It knows nothing of users, sessions, authentication, authorization, rate limits,'
+        + ' untrusted input or presentation: those belong to your application\'s adapters – a web UI, a public'
+        + ' REST or GraphQL API, a message consumer – which call this API over a private network.'
+        + ' Never expose it directly.',
+      ].join('\n'),
     },
     paths,
     components: { schemas },

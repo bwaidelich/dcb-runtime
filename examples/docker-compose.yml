@@ -1,0 +1,35 @@
+# The runtime over PostgreSQL, serving the playground's course-simple
+# fixture – Swagger UI at http://127.0.0.1:8080/docs.
+#
+#   docker compose -f examples/docker-compose.yml up
+#
+# The port is published on 127.0.0.1 only: this API is not a public one.
+
+services:
+  runtime:
+    image: ghcr.io/bwaidelich/dcb-runtime:latest
+    environment:
+      DCB_MODEL: https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json
+      DCB_STORE: postgres://postgres:pw@postgres:5432/postgres
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - cache:/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: pw
+    volumes:
+      - events:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+
+volumes:
+  cache:
+  events:
