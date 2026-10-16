@@ -26,6 +26,7 @@ export DCB_STORE_TIMEOUT="${DCB_STORE_TIMEOUT:-3s}"
 
 DOCKER_ARGS=()
 IMAGE_ARGS=()
+KIND="${1:-}"
 case "${1:-}" in
   umadb)  IMAGE=umadb/umadb:latest; PORT=50051; export DCB_STORE="umadb://localhost:$STORE_PORT" ;;
   tephra) IMAGE=git.tqwewe.com/tephra/tephra:latest; PORT=9000; export DCB_STORE="tephra://localhost:$STORE_PORT" ;;
@@ -40,7 +41,7 @@ case "${1:-}" in
     IMAGE_ARGS=(run --api-token smoke --data-directory-temporary --http-enabled --https-enabled=false)
     export DCB_STORE="eventsourcingdb://smoke@localhost:$STORE_PORT" ;;
   memory) IMAGE=""; export DCB_STORE="memory://" ;;
-  compose) IMAGE="${DCB_IMAGE:-ghcr.io/bwaidelich/dcb-runtime:latest}" ;;
+  compose) IMAGE="${DCB_IMAGE:-ghcr.io/bwaidelich/dcb-runtime:latest}"; KIND=postgres ;;
   *) echo "usage: $0 umadb|tephra|postgres|axonserver|eventsourcingdb|memory|compose" >&2; exit 2 ;;
 esac
 echo "$1 (${IMAGE:-in memory})"
@@ -101,6 +102,18 @@ expect() {
   fi
 }
 
+# What a jq filter makes of a response.
+shows() {
+  local want="$1" what="$2" filter="$3" got
+  shift 3
+  got="$(curl -s --max-time 20 "$@" | jq -r "$filter" 2>/dev/null || true)"
+  if [[ "$got" == "$want" ]]; then
+    echo "  ✓ $what → $want"
+  else
+    echo "  ✗ $what: expected $want, got $got"; failures=$((failures + 1))
+  fi
+}
+
 # The positions a read returns, and its `next`: "1,2 next=null".
 page() {
   local want="$1" what="$2" got
@@ -114,7 +127,10 @@ page() {
 }
 
 expect 200 'health' "$API/health"
+shows "ok $KIND null" 'health, empty store' '"\(.status) \(.store.kind) \(.store.head)"' "$API/health"
+shows 'true' 'health, durationMs' '.store.durationMs | type == "number"' "$API/health"
 expect 200 'contract' "$API/openapi.json"
+shows 'true' 'contract describes /health' '.paths["/health"].get != null' "$API/openapi.json"
 expect 200 'docs' "$API/docs"
 expect 200 'define c1' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c1","capacity":1}'
 expect 422 'define c1 again' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c1","capacity":1}'
@@ -132,6 +148,7 @@ else
   echo "  ✗ contract does not describe /read"; failures=$((failures + 1))
 fi
 page '1,2 next=null' 'read all' "$API/read"
+shows '2' 'health, head' '.store.head' "$API/health"
 page '1,2 next=null' 'read all, {}' "$API/read" -H 'content-type: application/json' -d '{}'
 page '1 next=1' 'read a page' "$API/read?limit=1"
 page '2 next=2' 'read the next page' "$API/read?limit=1&after=1"
@@ -185,6 +202,7 @@ fi
 if [[ "$1" != memory ]]; then
   if [[ "$1" == compose ]]; then compose stop postgres >/dev/null 2>&1; else docker rm -f "$NAME" >/dev/null; fi
   expect 503 'health, store gone' "$API/health"
+  shows "$KIND" 'health, store gone, kind' '.store.kind' "$API/health"
   expect 503 'read, store gone' -X POST "$API/read"
   expect 503 'define, store gone' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c4","capacity":1}'
 fi

@@ -312,7 +312,7 @@ The server answers at `http://127.0.0.1:8080`:
 | `GET /openapi.json`        | the contract, OpenAPI 3.1, generated from the model: arguments and published events typed by the model's own types, the refusals each command can give listed. Generate a client from it |
 | `GET /docs`                | Swagger UI over that contract (embedded; only with `--with-docs`)                                                                                                                         |
 | `POST /read`               | the events matching a DCB query, a page at a time (only with `--with-read`; [see below](#reading-events))                                                                                 |
-| `GET /health`              | whether the event store is serving                                                                                                                                                        |
+| `GET /health`              | whether the event store is serving: `{status, store: {kind, head, durationMs}}` – which store, its last position (null when empty; a position, not a count) and how long asking it took; a 503 names the `store.kind` |
 
 Requests are validated against the contract before anything is decided.
 

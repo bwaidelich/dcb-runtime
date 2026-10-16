@@ -140,6 +140,44 @@ impl EventStore {
         Ok(Self { backend, timeout })
     }
 
+    /// The store's name, one per store whatever the scheme it was reached by.
+    pub fn kind(&self) -> &'static str {
+        match &self.backend {
+            Backend::Memory(_) => "memory",
+            #[cfg(feature = "umadb")]
+            Backend::Umadb(_) => "umadb",
+            #[cfg(feature = "tephra")]
+            Backend::Tephra(_) => "tephra",
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(_) => "postgres",
+            #[cfg(feature = "axonserver")]
+            Backend::AxonServer(_) => "axonserver",
+            #[cfg(feature = "eventsourcingdb")]
+            Backend::EventSourcingDb(_) => "eventsourcingdb",
+        }
+    }
+
+    /// Every `kind` this build knows.
+    pub fn kinds() -> Vec<&'static str> {
+        let mut kinds = vec!["memory"];
+        if cfg!(feature = "umadb") {
+            kinds.push("umadb");
+        }
+        if cfg!(feature = "tephra") {
+            kinds.push("tephra");
+        }
+        if cfg!(feature = "postgres") {
+            kinds.push("postgres");
+        }
+        if cfg!(feature = "axonserver") {
+            kinds.push("axonserver");
+        }
+        if cfg!(feature = "eventsourcingdb") {
+            kinds.push("eventsourcingdb");
+        }
+        kinds
+    }
+
     async fn bounded<T, E>(&self, what: &str, call: impl Future<Output = std::result::Result<T, E>>, late: impl FnOnce(String) -> E) -> std::result::Result<T, E> {
         match tokio::time::timeout(self.timeout, call).await {
             Ok(result) => result,

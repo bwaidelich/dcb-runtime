@@ -11,12 +11,16 @@
 //! or – `backwards` – newest first. A full page names the position to go
 //! on `after` as `next`. 501 when the store cannot read that way.
 //!
+//! `GET /health` answers whether the store is serving, which store it is,
+//! its last position and how long it took to tell; 503 when it fails.
+//!
 //! Failures are RFC 9457 problem details. `/docs` (`--with-docs`) is
 //! Swagger UI over the contract, embedded, so it works without network
 //! access.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -28,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::component::{Event, Outcome, Pool};
 use crate::component::dcb::runtime::types::QueryItem;
-use crate::store::ReadOptions;
+use crate::store::{EventStore, ReadOptions};
 
 /// A page of `/read`, when the request names no `limit`.
 const DEFAULT_LIMIT: u64 = 100;
@@ -52,6 +56,8 @@ impl Api {
     pub async fn new(pool: Pool, read: bool) -> wasmtime::Result<Self> {
         let mut contract = pool.contract().await?;
         let mut document: Value = serde_json::from_str(&contract)?;
+        document["paths"]["/health"] = health_operation();
+        contract = document.to_string();
         let read = if read {
             document["paths"]["/read"] = read_operation();
             contract = document.to_string();
@@ -163,6 +169,66 @@ fn read_query_schema() -> Value {
             },
         },
         "additionalProperties": false,
+    })
+}
+
+/// `/health` in the contract.
+fn health_operation() -> Value {
+    let kind = json!({ "type": "string", "enum": EventStore::kinds(), "description": "Which event store this is." });
+    json!({
+        "get": {
+            "operationId": "health",
+            "tags": ["health"],
+            "summary": "Event store health",
+            "description": "Whether the event store is serving, which one it is, its last position and how long it took to tell.",
+            "responses": {
+                "200": {
+                    "description": "The event store is serving.",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "status": { "const": "ok" },
+                                    "store": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": kind,
+                                            "head": {
+                                                "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }],
+                                                "description": "The last position in the store – not a count of events: positions may have gaps. Null when the store is empty.",
+                                            },
+                                            "durationMs": { "type": "integer", "minimum": 0, "description": "How long asking the store took, in milliseconds." },
+                                        },
+                                        "required": ["kind", "head", "durationMs"],
+                                    },
+                                },
+                                "required": ["status", "store"],
+                            },
+                        },
+                    },
+                },
+                "503": {
+                    "description": "The event store failed.",
+                    "content": {
+                        "application/problem+json": {
+                            "schema": {
+                                "allOf": [
+                                    { "$ref": "#/components/schemas/ProblemDetails" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "store": { "type": "object", "properties": { "kind": kind }, "required": ["kind"] },
+                                        },
+                                        "required": ["store"],
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        },
     })
 }
 
@@ -321,10 +387,30 @@ async fn openapi(State(api): State<Arc<Api>>) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], api.contract.clone()).into_response()
 }
 
+/// The store's health, then its head: a store that cannot name its last
+/// position cannot decide a command either.
 async fn health(State(api): State<Arc<Api>>) -> Response {
-    match api.pool.store().health().await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
-        Err(reason) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store unavailable", reason, None),
+    let store = api.pool.store();
+    let started = Instant::now();
+    let head = match store.health().await {
+        Ok(()) => store.head().await,
+        Err(reason) => Err(reason),
+    };
+    match head {
+        Ok(head) => {
+            let duration = started.elapsed().as_millis() as u64;
+            let store = json!({ "kind": store.kind(), "head": head, "durationMs": duration });
+            (StatusCode::OK, Json(json!({ "status": "ok", "store": store }))).into_response()
+        }
+        Err(reason) => {
+            let body = json!({
+                "title": "Event store unavailable",
+                "status": StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                "detail": reason,
+                "store": { "kind": store.kind() },
+            });
+            (StatusCode::SERVICE_UNAVAILABLE, [(header::CONTENT_TYPE, "application/problem+json")], body.to_string()).into_response()
+        }
     }
 }
 
