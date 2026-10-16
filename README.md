@@ -210,9 +210,8 @@ model's generated contract.
 
 ## Status
 
-- The submodule points at a local checkout of the playground
-  (`feature/read-port`), which adds the read port the runtime needs.
-  Switch the URL to GitHub once that branch is published.
+- The submodule pins a commit of the playground's `feature/read-port`
+  branch, which adds the read port the runtime needs.
 - The component is about 14 MB: the JavaScript engine (StarlingMonkey)
   plus all of `model.js`, including the predefined models and editing
   commands the runtime never uses.
