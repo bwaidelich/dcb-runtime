@@ -1,5 +1,9 @@
 # DCB Runtime
 
+> [!WARNING]
+> **Experimental.** Interfaces and behaviour may change without notice –
+> not ready for production use yet.
+
 **Turn a DCB Model into a running command API – backed by a real event store.**
 
 Design your model in the [DCB Playground](https://github.com/dcb-events/dcb-playground),
@@ -15,10 +19,6 @@ OpenAPI contract, decided against PostgreSQL,
   playground's evaluator, so the runtime cannot disagree with it.
 - **Consistency built in** – DCB append conditions, automatic retries
   on concurrent writes, typed rejections.
-
-> [!NOTE]
-> Experimental. The reasoning behind it is in the playground's
-> `docs/research/2026-10-15-dcb-runtime-wasm.md`.
 
 ## Quick start
 
