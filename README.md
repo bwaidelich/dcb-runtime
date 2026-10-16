@@ -165,7 +165,20 @@ The store is picked by the scheme of the `--store` URL. Every adapter is
 behind a Cargo feature of the same name, all enabled by default – except
 the in-memory one, always built in.
 
-### PostgreSQL
+### Without a DCB event store
+
+Nothing but the host, or a PostgreSQL you may well run already.
+
+#### In memory
+
+```bash
+--store memory://
+```
+
+Events kept in the host's memory, gone when it stops – to try a model out,
+nothing to start first. Never for real data. Always built in.
+
+#### PostgreSQL
 
 No DCB store of its own: the adapter keeps the events in a table
 `dcb_events`, created on connect when missing, and checks the append
@@ -190,7 +203,11 @@ dcb-runtime-host serve course-simple.dcb.json \
   `?options=-csearch_path%3Dmy_schema`.
 - Plain connections only for now; `sslmode=require` is refused.
 
-### Axon Server
+### DCB event stores
+
+Stores that speak DCB themselves, in alphabetical order.
+
+#### Axon Server
 
 ```bash
 --store axonserver://[token@]host:8124[/context]    # axonserver+tls:// for TLS
@@ -218,7 +235,7 @@ dcb-runtime-host serve course-simple.dcb.json \
 - The client is generated from the vendored `hosts/rust/proto/axonserver/`
   at build time, without `protoc`.
 
-### EventSourcingDB
+#### EventSourcingDB
 
 ```bash
 --store eventsourcingdb://token@host:3000[/subject][?type-prefix=…]    # eventsourcingdb+tls:// for HTTPS
@@ -246,7 +263,7 @@ dcb-runtime-host serve course-simple.dcb.json \
   `eventsourcingdb://secret@host:3000/courses?type-prefix=com.example.courses`.
 - Without a licence it stores up to 25,000 events.
 
-### Tephra
+#### Tephra
 
 ```bash
 --store tephra://host:9000
@@ -266,16 +283,7 @@ dcb-runtime-host serve course-simple.dcb.json \
 - The client generates its protocol code at build time and needs `protoc`
   35.1 exactly (see [building from source](#quick-start)).
 
-### In memory
-
-```bash
---store memory://
-```
-
-Events kept in the host's memory, gone when it stops – to try a model out,
-nothing to start first. Never for real data. Always built in.
-
-### UmaDB
+#### UmaDB
 
 The default store.
 
