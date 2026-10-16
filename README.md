@@ -3,7 +3,8 @@
 Runs a DCB Model, as authored in the
 [DCB Playground](https://github.com/dcb-events/dcb-playground), against a
 real DCB event store – [UmaDB](https://umadb.io),
-[Tephra](https://tephra.tqwewe.com) or PostgreSQL. One generic WebAssembly component takes any model
+[Tephra](https://tephra.tqwewe.com), [Axon Server](https://www.axoniq.io/server),
+[EventSourcingDB](https://www.eventsourcingdb.io) or PostgreSQL. One generic WebAssembly component takes any model
 as data (its JSON envelope) and decides commands; the host connects it to
 a store.
 
@@ -51,7 +52,7 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
    ```
 
    The Tephra adapter needs `protoc` 35.1; without it, add
-   `--no-default-features --features umadb,postgres`.
+   `--no-default-features --features umadb,postgres,axonserver,eventsourcingdb`.
 
 3. **Export the model** from the playground as JSON, e.g. `my-model.json`,
    or use a fixture such as `playground/fixtures/course-simple.json`.
@@ -62,6 +63,9 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
    docker run --rm -d -p 50051:50051 umadb/umadb:latest                       # UmaDB
    docker run --rm -d -p 9000:9000 git.tqwewe.com/tephra/tephra:latest        # Tephra
    docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17        # PostgreSQL
+   docker run --rm -d -p 8124:8124 -e AXONIQ_AXONSERVER_STANDALONE_DCB=true axoniq/axonserver:latest   # Axon Server
+   docker run --rm -d -p 3000:3000 thenativeweb/eventsourcingdb:latest run \
+     --api-token secret --data-directory-temporary --http-enabled --https-enabled=false   # EventSourcingDB
    ```
 
 5. **Serve the model** – from the repository root, since the host loads
@@ -90,6 +94,8 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store tephra://localhost:9000   # Tephra
 hosts/rust/target/release/dcb-runtime-host serve my-model.json --store postgres://user:pw@localhost:5432/db   # PostgreSQL
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store axonserver://localhost:8124   # Axon Server (axonserver+tls:// for TLS)
+hosts/rust/target/release/dcb-runtime-host serve my-model.json --store eventsourcingdb://secret@localhost:3000   # EventSourcingDB (eventsourcingdb+tls:// for HTTPS)
 ```
 
 serves the model's commands at `http://127.0.0.1:8080`:
@@ -140,17 +146,37 @@ cargo build --release --manifest-path hosts/rust/Cargo.toml
 scripts/smoke.sh umadb    # a throwaway store container and the HTTP server:
 scripts/smoke.sh tephra   # every status, and 40 requests racing for one seat
 scripts/smoke.sh postgres
+scripts/smoke.sh axonserver
+scripts/smoke.sh eventsourcingdb
 ```
 
 The Tephra client generates its protocol code at build time and needs
 `protoc` 35.1 exactly – on the `PATH`, or named by `PROTOC`. To build
-without it: `cargo build --release --no-default-features --features umadb,postgres`.
+without it: `cargo build --release --no-default-features --features umadb,postgres,axonserver,eventsourcingdb`.
 
 PostgreSQL is no DCB store of its own: the adapter keeps the events in a
 table `dcb_events`, created on connect when missing (a `search_path` in
 the URL, `?options=-csearch_path%3Dmy_schema`, puts it elsewhere), and
 checks the append condition under an advisory lock, so appends happen one
 at a time. Plain connections only for now; `sslmode=require` is refused.
+
+Axon Server needs a DCB context: the standalone server's
+(`AXONIQ_AXONSERVER_STANDALONE_DCB=true`, as above), or one created with
+DCB enabled. The URL's path names it – `default` when there is none – and
+its user is the access token, when access control is on:
+`axonserver://token@host:8124/my-context`. A tag `key:value` becomes Axon's
+tag of that key and value, as Axon Framework writes them. Axon Server
+needs a licence beyond a 12-hour trial. Its client is generated from the
+vendored `hosts/rust/proto/axonserver/` at build time, without `protoc`.
+
+EventSourcingDB knows no tags and wants event types in reverse-domain
+notation. The adapter writes each event under the type
+`<prefix>.<EventName>` (prefix `dcb.runtime`, or the URL's `type-prefix`),
+with data `{"payload": …, "tags": […]}`, to one subject (the URL's path,
+`/` when there is none). It reads, and checks the append condition, with
+EventQL over the events of that subject and prefix:
+`eventsourcingdb://secret@host:3000/courses?type-prefix=com.example.courses`.
+Without a licence it stores up to 25,000 events.
 
 `npm test` runs every command scenario of the playground's shipped
 models and fixtures through the component, against an in-memory store
@@ -172,7 +198,8 @@ model's generated contract.
 - `hosts/node/` – the Node host's in-memory store.
 - `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store.rs` holds
   one adapter per event store, picked by the store URL's scheme and
-  each behind a Cargo feature (`umadb`, `tephra`, `postgres`; all by default).
+  each behind a Cargo feature (`umadb`, `tephra`, `postgres`, `axonserver`,
+  `eventsourcingdb`; all by default).
   Another DCB store is another adapter under its own scheme: `head`, `read`, `append`, and
   its failed-condition error mapped to `Integrity`. Compiling the component to native code takes
   seconds, so the host keeps the result beside it

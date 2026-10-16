@@ -7,24 +7,33 @@
 //!   postgres://user:pw@host:port/db
 //!                          PostgreSQL              feature `postgres`
 //!                          (also postgresql://)
+//!   axonserver://[token@]host:port[/context]
+//!                          Axon Server (gRPC)      feature `axonserver`
+//!   axonserver+tls://…     Axon Server over TLS
+//!   eventsourcingdb://token@host:port[/subject][?type-prefix=com.example]
+//!                          EventSourcingDB (HTTP)  feature `eventsourcingdb`
+//!   eventsourcingdb+tls://…  EventSourcingDB over HTTPS
 //!
 //! The scheme names the store, not the transport: two stores may well
 //! speak the same one.
 //!
-//! UmaDB and Tephra speak the DCB specification's read and conditional
-//! append, so their adapters only translate shapes: the component's query items,
-//! events and append condition into the client's, and its errors back –
-//! a failed condition as `AppendError::Integrity`, which the component
-//! answers by deciding again. PostgreSQL knows nothing of DCB: its
-//! adapter keeps the events in a table of its own and checks the
-//! condition itself.
+//! UmaDB, Tephra and Axon Server speak the DCB specification's read and
+//! conditional append, so their adapters only translate shapes: the
+//! component's query items, events and append condition into the
+//! client's, and its errors back – a failed condition as
+//! `AppendError::Integrity`, which the component answers by deciding
+//! again. EventSourcingDB has no tags, but checks an EventQL query on
+//! append: its adapter keeps the tags in the event's data and writes the
+//! condition as that query. PostgreSQL knows nothing of DCB: its adapter
+//! keeps the events in a table of its own and checks the condition
+//! itself.
 //!
 //! Every call is bounded by a timeout. A store that went away does not
 //! always say so – a client may wait on a connection nobody will answer
 //! – and a request waiting forever is worse than a 503.
 
-#[cfg(not(any(feature = "umadb", feature = "tephra", feature = "postgres")))]
-compile_error!("enable at least one event store: feature `umadb`, `tephra` or `postgres`");
+#[cfg(not(any(feature = "umadb", feature = "tephra", feature = "postgres", feature = "axonserver", feature = "eventsourcingdb")))]
+compile_error!("enable at least one event store: feature `umadb`, `tephra`, `postgres`, `axonserver` or `eventsourcingdb`");
 
 use std::future::Future;
 use std::time::Duration;
@@ -45,6 +54,12 @@ fn schemes() -> String {
     if cfg!(feature = "postgres") {
         known.push("postgres:// or postgresql:// for PostgreSQL");
     }
+    if cfg!(feature = "axonserver") {
+        known.push("axonserver:// or axonserver+tls:// for Axon Server");
+    }
+    if cfg!(feature = "eventsourcingdb") {
+        known.push("eventsourcingdb:// or eventsourcingdb+tls:// for EventSourcingDB");
+    }
     format!("use {}", known.join(", "))
 }
 
@@ -60,6 +75,10 @@ enum Backend {
     Tephra(tephra::Tephra),
     #[cfg(feature = "postgres")]
     Postgres(postgres::Postgres),
+    #[cfg(feature = "axonserver")]
+    AxonServer(axonserver::AxonServer),
+    #[cfg(feature = "eventsourcingdb")]
+    EventSourcingDb(eventsourcingdb::EventSourcingDb),
 }
 
 impl EventStore {
@@ -68,7 +87,7 @@ impl EventStore {
             return Err(format_err!("not a store URL: {url} – {}", schemes()));
         };
         // PostgreSQL takes the whole URL.
-        #[cfg(not(any(feature = "umadb", feature = "tephra")))]
+        #[cfg(not(any(feature = "umadb", feature = "tephra", feature = "axonserver", feature = "eventsourcingdb")))]
         let _ = address;
         let backend = async {
             match scheme {
@@ -80,6 +99,14 @@ impl EventStore {
                 "tephra" => Ok(Backend::Tephra(tephra::Tephra::connect(address).await?)),
                 #[cfg(feature = "postgres")]
                 "postgres" | "postgresql" => Ok(Backend::Postgres(postgres::Postgres::connect(url).await?)),
+                #[cfg(feature = "axonserver")]
+                "axonserver" => Ok(Backend::AxonServer(axonserver::AxonServer::connect(address, false).await?)),
+                #[cfg(feature = "axonserver")]
+                "axonserver+tls" => Ok(Backend::AxonServer(axonserver::AxonServer::connect(address, true).await?)),
+                #[cfg(feature = "eventsourcingdb")]
+                "eventsourcingdb" => Ok(Backend::EventSourcingDb(eventsourcingdb::EventSourcingDb::connect(address, false).await?)),
+                #[cfg(feature = "eventsourcingdb")]
+                "eventsourcingdb+tls" => Ok(Backend::EventSourcingDb(eventsourcingdb::EventSourcingDb::connect(address, true).await?)),
                 _ => Err(format_err!("no store this build connects to at {url} – {}", schemes())),
             }
         };
@@ -105,6 +132,10 @@ impl EventStore {
                 Backend::Tephra(store) => store.head().await,
                 #[cfg(feature = "postgres")]
                 Backend::Postgres(store) => store.head().await,
+                #[cfg(feature = "axonserver")]
+                Backend::AxonServer(store) => store.head().await,
+                #[cfg(feature = "eventsourcingdb")]
+                Backend::EventSourcingDb(store) => store.head().await,
             }
         };
         self.bounded("head", call, |m| m).await
@@ -119,6 +150,10 @@ impl EventStore {
                 Backend::Tephra(store) => store.read(query).await,
                 #[cfg(feature = "postgres")]
                 Backend::Postgres(store) => store.read(query).await,
+                #[cfg(feature = "axonserver")]
+                Backend::AxonServer(store) => store.read(query).await,
+                #[cfg(feature = "eventsourcingdb")]
+                Backend::EventSourcingDb(store) => store.read(query).await,
             }
         };
         self.bounded("read", call, |m| m).await
@@ -140,6 +175,10 @@ impl EventStore {
                 Backend::Tephra(store) => store.append(events, condition).await,
                 #[cfg(feature = "postgres")]
                 Backend::Postgres(store) => store.append(events, condition).await,
+                #[cfg(feature = "axonserver")]
+                Backend::AxonServer(store) => store.append(events, condition).await,
+                #[cfg(feature = "eventsourcingdb")]
+                Backend::EventSourcingDb(store) => store.append(events, condition).await,
             }
         };
         self.bounded("append", call, AppendError::Other).await
@@ -155,6 +194,10 @@ impl EventStore {
                 Backend::Tephra(store) => store.health().await,
                 #[cfg(feature = "postgres")]
                 Backend::Postgres(store) => store.health().await,
+                #[cfg(feature = "axonserver")]
+                Backend::AxonServer(store) => store.health().await,
+                #[cfg(feature = "eventsourcingdb")]
+                Backend::EventSourcingDb(store) => store.health().await,
             }
         };
         self.bounded("health", call, |m| m).await
@@ -491,5 +534,433 @@ mod postgres {
             let client = self.0.get().await.map_err(|e| e.to_string())?;
             client.query_one("SELECT 1", &[]).await.map(|_| ()).map_err(|e| e.to_string())
         }
+    }
+}
+
+/// What follows the scheme in a store URL: `[user@]host:port[/path][?query]`.
+#[cfg(any(feature = "axonserver", feature = "eventsourcingdb"))]
+struct Address<'a> {
+    user: Option<&'a str>,
+    host: &'a str,
+    /// Without its leading slash; empty when there is none.
+    path: &'a str,
+    #[cfg_attr(not(feature = "eventsourcingdb"), allow(dead_code))]
+    query: &'a str,
+}
+
+#[cfg(any(feature = "axonserver", feature = "eventsourcingdb"))]
+impl<'a> Address<'a> {
+    fn parse(address: &'a str) -> Self {
+        let (rest, query) = address.split_once('?').unwrap_or((address, ""));
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let (user, host) = match authority.rsplit_once('@') {
+            Some((user, host)) => (Some(user), host),
+            None => (None, authority),
+        };
+        Address { user, host, path: path.trim_end_matches('/'), query }
+    }
+
+    #[cfg_attr(not(feature = "eventsourcingdb"), allow(dead_code))]
+    fn param(&self, name: &str) -> Option<&'a str> {
+        self.query.split('&').find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+    }
+}
+
+/// Axon Server's DCB event store, in a context created as one – the
+/// standalone server's with `axoniq.axonserver.standalone-dcb=true`. The
+/// URL's path names the context, `default` when it names none; its user is
+/// the access token, when access control is on.
+///
+/// Axon numbers events from sequence 0; positions here start at 1, as in
+/// the other stores, so a position is its sequence + 1. Axon's head – the
+/// sequence the next event gets – is then the position of the last.
+///
+/// A tag `key:value` is Axon's tag of that key and value, as Axon
+/// Framework writes them; a tag without a colon has an empty value. The
+/// events Axon sources carry no tags – their tags are a call per event
+/// away – so a read returns events without them: the component folds
+/// types and data only.
+#[cfg(feature = "axonserver")]
+mod axonserver {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tonic::metadata::{AsciiMetadataValue, MetadataValue};
+    use tonic::service::Interceptor;
+    use tonic::service::interceptor::InterceptedService;
+    use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+    use tonic::{Code, Request, Status};
+    use wasmtime::{Result, format_err};
+
+    use super::{Address, AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+
+    /// The generated code refers across packages by relative paths, so
+    /// the modules nest as the packages do. Of `common.proto` only what
+    /// `dcb.proto` uses is used.
+    #[allow(dead_code, clippy::all)]
+    mod io {
+        pub mod axoniq {
+            pub mod axonserver {
+                pub mod grpc {
+                    tonic::include_proto!("io.axoniq.axonserver.grpc");
+                    pub mod event {
+                        pub mod dcb {
+                            tonic::include_proto!("io.axoniq.axonserver.grpc.event.dcb");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    use io::axoniq::axonserver::grpc::event::dcb::{
+        self as proto, AppendEventsRequest, ConsistencyCondition, Criterion, GetHeadRequest, SourceEventsRequest,
+        TagsAndNamesCriterion, TaggedEvent, dcb_event_store_client::DcbEventStoreClient,
+        source_events_response::Result as Sourced,
+    };
+
+    /// Names the context, and the token when there is one, on every call.
+    #[derive(Clone)]
+    pub struct Headers {
+        context: AsciiMetadataValue,
+        token: Option<AsciiMetadataValue>,
+    }
+
+    impl Interceptor for Headers {
+        fn call(&mut self, mut request: Request<()>) -> std::result::Result<Request<()>, Status> {
+            request.metadata_mut().insert("axoniq-context", self.context.clone());
+            if let Some(token) = &self.token {
+                request.metadata_mut().insert("axoniq-access-token", token.clone());
+            }
+            Ok(request)
+        }
+    }
+
+    pub struct AxonServer(DcbEventStoreClient<InterceptedService<Channel, Headers>>);
+
+    fn text(status: Status) -> String {
+        format!("{:?}: {}", status.code(), status.message())
+    }
+
+    fn tag_of(tag: String) -> proto::Tag {
+        let (key, value) = tag.split_once(':').unwrap_or((&tag, ""));
+        proto::Tag { key: key.as_bytes().to_vec(), value: value.as_bytes().to_vec() }
+    }
+
+    fn criteria_of(items: Vec<QueryItem>) -> Vec<Criterion> {
+        items
+            .into_iter()
+            .map(|item| Criterion {
+                tags_and_names: Some(TagsAndNamesCriterion {
+                    name: item.types,
+                    tag: item.tags.into_iter().map(tag_of).collect(),
+                }),
+            })
+            .collect()
+    }
+
+    impl AxonServer {
+        pub async fn connect(address: &str, tls: bool) -> Result<Self> {
+            let address = Address::parse(address);
+            let fail = |e: String| format_err!("connecting to Axon Server at {}: {e}", address.host);
+            let header = |value: &str, what: &str| {
+                MetadataValue::try_from(value).map_err(|_| fail(format!("{what} is no valid header value")))
+            };
+            let headers = Headers {
+                context: header(if address.path.is_empty() { "default" } else { address.path }, "the context")?,
+                token: address.user.map(|token| header(token, "the token")).transpose()?,
+            };
+            let mut endpoint = Endpoint::from_shared(format!("{}://{}", if tls { "https" } else { "http" }, address.host))
+                .map_err(|e| fail(e.to_string()))?;
+            if tls {
+                endpoint = endpoint.tls_config(ClientTlsConfig::new().with_native_roots()).map_err(|e| fail(e.to_string()))?;
+            }
+            let channel = endpoint.connect().await.map_err(|e| fail(e.to_string()))?;
+            let store = AxonServer(DcbEventStoreClient::with_interceptor(channel, headers));
+            // A context that is none, or no DCB one, fails here, not on the
+            // first command.
+            store.head().await.map_err(fail)?;
+            Ok(store)
+        }
+
+        pub async fn head(&self) -> Result<Option<u64>, String> {
+            let head = self.0.clone().get_head(GetHeadRequest {}).await.map_err(text)?.into_inner().sequence;
+            Ok((head > 0).then_some(head as u64))
+        }
+
+        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
+            // No items match nothing; Axon's empty criteria would match all.
+            if query.is_empty() {
+                return Ok(Vec::new());
+            }
+            let request = SourceEventsRequest { from_sequence: 0, criterion: criteria_of(query) };
+            let mut stream = self.0.clone().source(request).await.map_err(text)?.into_inner();
+            let mut events = Vec::new();
+            while let Some(response) = stream.message().await.map_err(text)? {
+                if let Some(Sourced::Event(proto::SequencedEvent { sequence, event: Some(event) })) = response.result {
+                    events.push(SequencedEvent {
+                        position: sequence as u64 + 1,
+                        event: Event {
+                            event_type: event.name,
+                            data: String::from_utf8_lossy(&event.payload).into_owned(),
+                            tags: Vec::new(),
+                        },
+                    });
+                }
+            }
+            Ok(events)
+        }
+
+        pub async fn append(&self, events: Vec<Event>, condition: Option<AppendCondition>) -> Result<u64, AppendError> {
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+            let events = events
+                .into_iter()
+                .map(|event| TaggedEvent {
+                    event: Some(proto::Event {
+                        identifier: uuid::Uuid::new_v4().to_string(),
+                        timestamp,
+                        name: event.event_type,
+                        version: String::new(),
+                        payload: event.data.into_bytes(),
+                        metadata: Default::default(),
+                    }),
+                    tag: event.tags.into_iter().map(tag_of).collect(),
+                })
+                .collect();
+            // Axon rejects events from the marker's sequence on – the
+            // position after `after`; no items match nothing.
+            let condition = condition.filter(|c| !c.fail_if_events_match.is_empty()).map(|condition| ConsistencyCondition {
+                consistency_marker: condition.after.unwrap_or(0) as i64,
+                criterion: criteria_of(condition.fail_if_events_match),
+            });
+            let request = AppendEventsRequest { condition, event: events };
+            match self.0.clone().append(tokio_stream::once(request)).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    Ok((response.sequence_of_the_first_event + i64::from(response.transaction_size)) as u64)
+                }
+                Err(status) if is_conflict(&status) => Err(AppendError::Integrity),
+                Err(status) => Err(AppendError::Other(text(status))),
+            }
+        }
+
+        pub async fn health(&self) -> Result<(), String> {
+            self.head().await.map(|_| ())
+        }
+    }
+
+    /// A failed consistency condition: Axon cancels the append, and names
+    /// the exception only in the message – its error code is the generic
+    /// AXONIQ-0001.
+    fn is_conflict(status: &Status) -> bool {
+        status.code() == Code::Cancelled && status.message().contains("ConsistencyConditionException")
+    }
+}
+
+/// EventSourcingDB, over its HTTP API. The URL's user is the API token;
+/// its path names the subject events are written to, `/` when it names
+/// none.
+///
+/// EventSourcingDB knows no tags, and wants event types in reverse-domain
+/// notation. So an event's type is the URL's `type-prefix` (`dcb.runtime`
+/// when it names none) and its own, `dcb.runtime.CourseDefined`; its data
+/// is `{"payload": …, "tags": […]}`. Reads and conditions are EventQL
+/// queries over the events of that subject and prefix – those this
+/// adapter writes.
+///
+/// Event ids count from 0; positions here start at 1, as in the other
+/// stores, so a position is its id + 1.
+#[cfg(feature = "eventsourcingdb")]
+mod eventsourcingdb {
+    use reqwest::{Client, Response, StatusCode};
+    use serde_json::{Value, json};
+    use wasmtime::{Result, format_err};
+
+    use super::{Address, AppendCondition, AppendError, Event, QueryItem, SequencedEvent};
+
+    /// The `source` of the events written: the CloudEvents attribute
+    /// naming who wrote them.
+    const SOURCE: &str = "urn:dcb-runtime";
+
+    pub struct EventSourcingDb {
+        client: Client,
+        api: String,
+        token: String,
+        subject: String,
+        /// The type prefix, with its trailing dot.
+        prefix: String,
+    }
+
+    /// A string as an EventQL literal: EventQL reads JSON's escapes.
+    fn literal(s: &str) -> String {
+        Value::from(s).to_string()
+    }
+
+    impl EventSourcingDb {
+        pub async fn connect(address: &str, tls: bool) -> Result<Self> {
+            let address = Address::parse(address);
+            let fail = |e: String| format_err!("connecting to EventSourcingDB at {}: {e}", address.host);
+            let token = address.user.ok_or_else(|| fail("no API token – eventsourcingdb://token@host:port".into()))?;
+            let store = EventSourcingDb {
+                client: Client::new(),
+                api: format!("{}://{}/api/v1", if tls { "https" } else { "http" }, address.host),
+                token: token.to_string(),
+                subject: format!("/{}", address.path),
+                prefix: format!("{}.", address.param("type-prefix").unwrap_or("dcb.runtime")),
+            };
+            store.health().await.map_err(fail)?;
+            Ok(store)
+        }
+
+        async fn post(&self, route: &str, body: Value) -> Result<Response, String> {
+            self.client
+                .post(format!("{}/{route}", self.api))
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| e.to_string())
+        }
+
+        async fn failure(response: Response) -> String {
+            let status = response.status();
+            match response.text().await {
+                Ok(body) if !body.trim().is_empty() => format!("{status}: {}", body.trim()),
+                _ => status.to_string(),
+            }
+        }
+
+        /// The query as an EventQL condition on `e`, the events this
+        /// adapter writes. An item matches when the event's type is one of
+        /// its types (any, when it names none) and its tags hold all the
+        /// item's; no items match nothing.
+        fn matching(&self, items: Vec<QueryItem>) -> String {
+            let items: Vec<String> = items
+                .into_iter()
+                .map(|item| {
+                    let mut clauses = Vec::new();
+                    if !item.types.is_empty() {
+                        let types: Vec<String> =
+                            item.types.iter().map(|t| format!("e.type == {}", literal(&format!("{}{t}", self.prefix)))).collect();
+                        clauses.push(format!("({})", types.join(" OR ")));
+                    }
+                    clauses.extend(item.tags.iter().map(|tag| format!("e.data.tags CONTAINS {}", literal(tag))));
+                    if clauses.is_empty() { "TRUE".into() } else { format!("({})", clauses.join(" AND ")) }
+                })
+                .collect();
+            // The tests on the subject and prefix come first: AND stops at
+            // the first false, and other events may have no tags to test.
+            format!(
+                "e.subject == {} AND STARTSWITH(e.type, {}) AND ({})",
+                literal(&self.subject),
+                literal(&self.prefix),
+                if items.is_empty() { "FALSE".into() } else { items.join(" OR ") }
+            )
+        }
+
+        /// The events' order is the store's, as the ids'; the last event of
+        /// all subjects is the first read backwards from the root.
+        pub async fn head(&self) -> Result<Option<u64>, String> {
+            let body = json!({"subject": "/", "options": {"recursive": true, "order": "antichronological"}});
+            let mut response = self.post("read-events", body).await?;
+            if !response.status().is_success() {
+                return Err(Self::failure(response).await);
+            }
+            let mut line = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+                line.extend_from_slice(&chunk);
+                if let Some(end) = line.iter().position(|&b| b == b'\n') {
+                    line.truncate(end);
+                    break;
+                }
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
+                return Ok(None);
+            }
+            match serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())? {
+                item if item["type"] == "event" => Ok(Some(id_of(&item["payload"])? + 1)),
+                item => Err(format!("unexpected answer: {item}")),
+            }
+        }
+
+        pub async fn read(&self, query: Vec<QueryItem>) -> Result<Vec<SequencedEvent>, String> {
+            if query.is_empty() {
+                return Ok(Vec::new());
+            }
+            let eventql = format!("FROM e IN events WHERE {} ORDER BY e.id PROJECT INTO e", self.matching(query));
+            let response = self.post("run-eventql-query", json!({"query": eventql})).await?;
+            if !response.status().is_success() {
+                return Err(Self::failure(response).await);
+            }
+            let body = response.text().await.map_err(|e| e.to_string())?;
+            let mut events = Vec::new();
+            for line in body.lines().filter(|l| !l.trim().is_empty()) {
+                let item: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                match item["type"].as_str() {
+                    Some("row") => {
+                        let event = &item["payload"];
+                        let event_type = event["type"].as_str().unwrap_or_default();
+                        events.push(SequencedEvent {
+                            position: id_of(event)? + 1,
+                            event: Event {
+                                event_type: event_type.strip_prefix(&self.prefix).unwrap_or(event_type).to_string(),
+                                data: event["data"]["payload"].to_string(),
+                                tags: event["data"]["tags"]
+                                    .as_array()
+                                    .map(|tags| tags.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+                                    .unwrap_or_default(),
+                            },
+                        });
+                    }
+                    Some("error") => return Err(item["payload"]["error"].as_str().unwrap_or("query failed").to_string()),
+                    _ => {}
+                }
+            }
+            Ok(events)
+        }
+
+        pub async fn append(&self, events: Vec<Event>, condition: Option<AppendCondition>) -> Result<u64, AppendError> {
+            let other = AppendError::Other;
+            let events = events
+                .into_iter()
+                .map(|event| {
+                    let payload: Value = serde_json::from_str(&event.data).map_err(|e| other(format!("data is no JSON: {e}")))?;
+                    Ok(json!({
+                        "source": SOURCE,
+                        "subject": self.subject,
+                        "type": format!("{}{}", self.prefix, event.event_type),
+                        "data": {"payload": payload, "tags": event.tags},
+                    }))
+                })
+                .collect::<Result<Vec<_>, AppendError>>()?;
+            let mut body = json!({"events": events});
+            if let Some(condition) = condition.filter(|c| !c.fail_if_events_match.is_empty()) {
+                // The events after `after` are those from its id on; ids
+                // compare as text in a precondition, unless cast.
+                let after = condition.after.map(|after| format!("(e.id AS INT) >= {after} AND ")).unwrap_or_default();
+                let eventql = format!(
+                    "FROM e IN events WHERE {after}{} PROJECT INTO COUNT() == 0",
+                    self.matching(condition.fail_if_events_match)
+                );
+                body["preconditions"] = json!([{"type": "isEventQlQueryTrue", "payload": {"query": eventql}}]);
+            }
+            let response = self.post("write-events", body).await.map_err(other)?;
+            match response.status() {
+                StatusCode::OK => {
+                    let written: Value = response.json().await.map_err(|e| other(e.to_string()))?;
+                    let last = written.as_array().and_then(|events| events.last()).ok_or_else(|| other("no events written".into()))?;
+                    Ok(id_of(last).map_err(other)? + 1)
+                }
+                StatusCode::CONFLICT => Err(AppendError::Integrity),
+                _ => Err(other(Self::failure(response).await)),
+            }
+        }
+
+        pub async fn health(&self) -> Result<(), String> {
+            let response = self.post("verify-api-token", json!({})).await?;
+            if response.status().is_success() { Ok(()) } else { Err(Self::failure(response).await) }
+        }
+    }
+
+    fn id_of(event: &Value) -> Result<u64, String> {
+        event["id"].as_str().and_then(|id| id.parse().ok()).ok_or_else(|| format!("an event without id: {event}"))
     }
 }

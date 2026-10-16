@@ -8,16 +8,28 @@ axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 deadpool-postgres = { version = "0.14.2", optional = true }
 jsonschema = "0.58.6"
+prost = { version = "0.14.4", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"], optional = true }
 serde_json = "1.0.154"
 tephra-client = { version = "0.5.2", features = ["async"], optional = true }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
 tokio-postgres = { version = "0.7.18", optional = true }
+tokio-stream = { version = "0.1.19", optional = true }
+tonic = { version = "0.14.6", features = ["tls-aws-lc", "tls-native-roots"], optional = true }
+tonic-prost = { version = "0.14.6", optional = true }
 umadb-client = { version = "0.7.8", optional = true }
 umadb-dcb = { version = "0.7.8", optional = true }
+uuid = { version = "1.28.0", features = ["v4"], optional = true }
 wasmtime = { version = "44.0.3", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std"] }
 
+[build-dependencies]
+protox = { version = "0.10.0", optional = true }
+tonic-prost-build = { version = "0.14.6", optional = true }
+
 [features]
-default = ["umadb", "tephra", "postgres"]
+default = ["umadb", "tephra", "postgres", "axonserver", "eventsourcingdb"]
 umadb = ["dep:umadb-client", "dep:umadb-dcb"]
 tephra = ["dep:tephra-client"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
+axonserver = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:tokio-stream", "dep:uuid", "dep:protox", "dep:tonic-prost-build"]
+eventsourcingdb = ["dep:reqwest"]

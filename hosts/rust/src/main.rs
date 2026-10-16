@@ -1,5 +1,5 @@
-//! A host for the DCB Runtime component over a DCB event store – UmaDB
-//! or Tephra (`store.rs`).
+//! A host for the DCB Runtime component over a DCB event store – UmaDB,
+//! Tephra, PostgreSQL, Axon Server or EventSourcingDB (`store.rs`).
 //!
 //!     dcb-runtime-host serve <model.json>                     an HTTP API for the model's commands
 //!     dcb-runtime-host run <model.json> <command> <args-json>  decide one command, print the outcome
@@ -29,7 +29,10 @@ struct Cli {
 struct Common {
     /// The model, as the playground exports it (JSON).
     model: String,
-    /// The event store: umadb://host:port (or umadb+tls://) for UmaDB, tephra://host:port for Tephra.
+    /// The event store: umadb://host:port (or umadb+tls://) for UmaDB, tephra://host:port for Tephra,
+    /// postgres://user:pw@host:port/db for PostgreSQL, axonserver://host:port[/context] (or
+    /// axonserver+tls://) for Axon Server, eventsourcingdb://token@host:port (or eventsourcingdb+tls://)
+    /// for EventSourcingDB.
     #[arg(long, env = "DCB_STORE", default_value = "umadb://localhost:50051")]
     store: String,
     /// How long a call to the store may take before it counts as failed.

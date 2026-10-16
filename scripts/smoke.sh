@@ -3,7 +3,7 @@
 # it and the HTTP server over the playground's course-simple fixture, and
 # checks each status the API answers with.
 #
-#   scripts/smoke.sh umadb|tephra|postgres
+#   scripts/smoke.sh umadb|tephra|postgres|axonserver|eventsourcingdb
 #
 # Needs Docker, curl, `npm run build`, and `cargo build --release` in
 # hosts/rust.
@@ -20,17 +20,25 @@ API="http://127.0.0.1:$HTTP_PORT"
 export DCB_STORE_TIMEOUT="${DCB_STORE_TIMEOUT:-3s}"
 
 DOCKER_ARGS=()
+IMAGE_ARGS=()
 case "${1:-}" in
   umadb)  IMAGE=umadb/umadb:latest; PORT=50051; export DCB_STORE="umadb://localhost:$STORE_PORT" ;;
   tephra) IMAGE=git.tqwewe.com/tephra/tephra:latest; PORT=9000; export DCB_STORE="tephra://localhost:$STORE_PORT" ;;
   postgres)
     IMAGE=postgres:17; PORT=5432; DOCKER_ARGS=(--env POSTGRES_PASSWORD=smoke)
     export DCB_STORE="postgres://postgres:smoke@localhost:$STORE_PORT/postgres" ;;
-  *) echo "usage: $0 umadb|tephra|postgres" >&2; exit 2 ;;
+  axonserver)
+    IMAGE=axoniq/axonserver:latest; PORT=8124; DOCKER_ARGS=(--env AXONIQ_AXONSERVER_STANDALONE_DCB=true)
+    export DCB_STORE="axonserver://localhost:$STORE_PORT" ;;
+  eventsourcingdb)
+    IMAGE=thenativeweb/eventsourcingdb:latest; PORT=3000
+    IMAGE_ARGS=(run --api-token smoke --data-directory-temporary --http-enabled --https-enabled=false)
+    export DCB_STORE="eventsourcingdb://smoke@localhost:$STORE_PORT" ;;
+  *) echo "usage: $0 umadb|tephra|postgres|axonserver|eventsourcingdb" >&2; exit 2 ;;
 esac
 echo "$1 ($IMAGE)"
 
-docker run --rm -d --name "$NAME" --publish "$STORE_PORT:$PORT" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} "$IMAGE" >/dev/null
+docker run --rm -d --name "$NAME" --publish "$STORE_PORT:$PORT" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} "$IMAGE" ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} >/dev/null
 server=""
 cleanup() {
   [[ -n "$server" ]] && kill "$server" 2>/dev/null || true
