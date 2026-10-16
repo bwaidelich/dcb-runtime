@@ -78,13 +78,36 @@ interface decider {
     store(string),
   }
 
+  record projected {
+    /// The projection's value, as JSON.
+    value: string,
+    /// The position of the last event folded; none when it folded none.
+    position: option<u64>,
+  }
+
+  variant projection-outcome {
+    projected(projected),
+    /// The request does not name a projection of the model, or its
+    /// parameters are no JSON object.
+    invalid(string),
+    /// The projection could not be folded: the model is defective, a
+    /// script threw, or its value is no JSON.
+    evaluation(string),
+    /// The store failed.
+    store(string),
+  }
+
   /// Loads a model from its JSON envelope (dcb-model.schema.json).
   init: func(model-json: string) -> result<_, string>;
   handle: func(command: string, args-json: string) -> outcome;
+  /// Folds a projection, read by `params-json`: one object of its tags
+  /// and its arguments, by name.
+  project: func(projection: string, params-json: string) -> projection-outcome;
   /// The loaded model's API, as an OpenAPI 3.1 document (JSON): one
   /// operation per command, its arguments and published events typed
-  /// by the model's definitions.
-  contract: func() -> result<string, string>;
+  /// by the model's definitions – and, `with-projections`, one per
+  /// projection, its tags and arguments as parameters.
+  contract: func(with-projections: bool) -> result<string, string>;
 }
 
 world runtime {

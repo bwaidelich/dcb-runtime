@@ -123,6 +123,7 @@ curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
 | `--store-timeout` | `DCB_STORE_TIMEOUT`  | `10s`                     | how long a store call may take before it is a failure |
 | `--with-docs`     | `DCB_WITH_DOCS`      | off                       | serve Swagger UI at `/docs`                           |
 | `--with-read`     | `DCB_WITH_READ`      | off                       | serve [`POST /read`](#reading-events)                 |
+| `--with-projections` | `DCB_WITH_PROJECTIONS` | off                  | serve [`GET /projections/…`](#querying-projections)   |
 | `--wasm`          | `DCB_RUNTIME_WASM`   | built in                  | another runtime component to use                      |
 
 The model is a file or an `http(s)://` URL, fetched once on start; for
@@ -312,6 +313,7 @@ The server answers at `http://127.0.0.1:8080`:
 | `GET /openapi.json`        | the contract, OpenAPI 3.1, generated from the model: arguments and published events typed by the model's own types, the refusals each command can give listed. Generate a client from it |
 | `GET /docs`                | Swagger UI over that contract (embedded; only with `--with-docs`)                                                                                                                         |
 | `POST /read`               | the events matching a DCB query, a page at a time (only with `--with-read`; [see below](#reading-events))                                                                                 |
+| `GET /projections/{Projection}` | a projection's value, read by its tags and arguments (only with `--with-projections`; [see below](#querying-projections))                                                        |
 | `GET /health`              | whether the event store is serving: `{status, store: {kind, head, durationMs}}` – which store, its last position (null when empty; a position, not a count) and how long asking it took; a 503 names the `store.kind` |
 
 Requests are validated against the contract before anything is decided.
@@ -359,6 +361,36 @@ one. 400 for an invalid query or parameter, 501 when the store cannot
 read that way (Axon Server reads forwards only), 503 when it failed.
 It exposes every event in the store, so it is off unless asked for.
 
+### Querying projections
+
+`GET /projections/{Projection}` folds one of the model's projections, as
+the playground does, and answers `{"value", "position"}`: its value, and
+the position of the last event it folded (`null` when it folded none).
+Its tags and arguments are query parameters, by name – a scalar as it
+is (`c1`, `12`, `true`), a composite as JSON – each typed in the
+contract, every one required.
+
+<details>
+<summary><b>Example: a course's capacity</b></summary>
+
+```bash
+curl 'http://127.0.0.1:8080/projections/CourseCapacity?courseId=c1'
+```
+
+</details>
+
+- It is folded from the store on every request – nothing kept, nothing
+  cached (`Cache-Control: no-store`), so it reflects every command
+  already answered, and costs a read of every event it folds.
+- A derived projection reads once per projection it derives from; those
+  reads are cut off at the store's head, taken first, so it is folded as
+  of one position.
+
+400 for a missing, unknown, repeated or mistyped parameter, 404 for no
+such projection, 500 when it cannot be folded (a script threw, or holds
+a value that is no JSON), 503 when the store failed. Like `/read`, it
+exposes what the events hold, so it is off unless asked for.
+
 ## How it works
 
 - **The playground decides.** The component is the playground's
@@ -367,7 +399,9 @@ It exposes every event in the store, so it is off unless asked for.
   semantics.
 - **Ports** (`wit/runtime.wit`):
   - exports `decider`: `init(model-json)`, `handle(command, args-json)`
-    → `published | rejected | conflict | error`;
+    → `published | rejected | conflict | error`,
+    `project(projection, params-json)` → `projected | error`, and
+    `contract(with-projections)`;
   - imports `store`: `head`, `read(query)`, `append(events, condition)`,
     as the DCB specification describes them. The host implements it.
 - **The decision cycle.** The evaluator asks the store once per round

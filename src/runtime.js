@@ -19,6 +19,11 @@
 // second read come unannounced anyway, the decision restarts with
 // `head`. A lost race – the append's condition failing – reruns the
 // whole cycle, up to MAX_ATTEMPTS times.
+//
+// A projection is folded the same way, `foldProjection` through a port,
+// with nothing to append: one read, or – a derived projection, one per
+// operand – head first and every read cut off at it, so the operands
+// are folded as of one position, not each as of its own.
 // ============================================================
 
 import { head, read, append } from 'dcb:runtime/store@0.1.0';
@@ -27,7 +32,8 @@ const MAX_ATTEMPTS = 3;
 const RESTART_WITH_HEAD = Symbol('restart with head');
 
 let loaded = null;
-let contract = null;
+// The contract, without and with projections.
+let contracts = {};
 
 // A store that failed is no fault of the model's; the outcome says so
 // (`store`), so the host can answer it as the unavailability it is.
@@ -99,10 +105,57 @@ function handleOnce(command, args, withHead) {
   }
 }
 
+// Whether a value is JSON as it stands – what a script may have built
+// instead (a Set, a Map, undefined) would not survive the trip.
+function isJson(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJson);
+  if (typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  return Object.values(value).every(isJson);
+}
+
+// The projection, read by `params` – its tags and its arguments, by
+// name – folded through the store.
+function projectOnce(projection, params) {
+  const body = loaded['projection-definitions'][projection];
+  // Where every read is cut off – nothing, at an empty store's head.
+  const cut = derivedOf(body) ? { at: fromStore('head', () => head()) } : null;
+  let last;
+  const port = (items) => {
+    const answered = fromStore('read', () => read(items.map(({ types, tags }) => ({ types, tags }))));
+    return answered
+      .filter(({ position }) => !cut || (cut.at !== undefined && position <= cut.at))
+      .map(({ position, event }) => {
+        if (last === undefined || position > last) last = position;
+        return { type: event.eventType, data: JSON.parse(event.data) };
+      });
+  };
+  const tags = {};
+  const args = {};
+  for (const tag of projectionTagParams(body)) tags[tag.name] = evOwn(params, tag.name);
+  for (const argument of body.arguments || []) args[argument.name] = evOwn(params, argument.name);
+  const value = evNormalize(foldProjection(loaded, port, projection, { tags, args }));
+  if (!isJson(value)) return { tag: 'evaluation', val: `Projection "${projection}" holds a value that is no JSON.` };
+  return { tag: 'projected', val: { value: JSON.stringify(value), position: last } };
+}
+
+// A tag and an argument of one name would be one parameter.
+function clashingParameters(model) {
+  const clashes = [];
+  for (const [name, body] of Object.entries(model['projection-definitions'])) {
+    const tags = new Set(projectionTagParams(body).map((tag) => tag.name));
+    for (const argument of body.arguments || []) {
+      if (argument && tags.has(argument.name)) clashes.push(`projection "${name}": "${argument.name}" is a tag and an argument`);
+    }
+  }
+  return clashes;
+}
+
 export const decider = {
   init(modelJson) {
     loaded = null;
-    contract = null;
+    contracts = {};
     let envelope;
     try {
       envelope = JSON.parse(modelJson);
@@ -124,7 +177,10 @@ export const decider = {
     if (imported.skipped.length) {
       throw imported.skipped.map((s) => `${s.kind} "${s.name}": ${s.reason}`).join('\n');
     }
-    loaded = projectState()[imported.modelId];
+    const model = projectState()[imported.modelId];
+    const clashes = clashingParameters(model);
+    if (clashes.length) throw clashes.join('\n');
+    loaded = model;
   },
 
   handle(command, argsJson) {
@@ -148,9 +204,32 @@ export const decider = {
     return { tag: 'conflict' };
   },
 
-  contract() {
+  project(projection, paramsJson) {
+    if (!loaded) return { tag: 'evaluation', val: 'No model is loaded.' };
+    if (!evOwn(loaded['projection-definitions'], projection)) {
+      return { tag: 'invalid', val: `The model has no projection "${projection}".` };
+    }
+    let params;
+    try {
+      params = JSON.parse(paramsJson);
+    } catch (error) {
+      return { tag: 'invalid', val: `The parameters are no JSON: ${evErrorText(error)}` };
+    }
+    if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+      return { tag: 'invalid', val: 'The parameters are no JSON object.' };
+    }
+    try {
+      return projectOnce(projection, params);
+    } catch (error) {
+      if (error instanceof StoreFailure) return { tag: 'store', val: error.message };
+      return { tag: 'evaluation', val: evErrorText(error) };
+    }
+  },
+
+  contract(withProjections) {
     if (!loaded) throw 'No model is loaded.';
-    if (!contract) contract = JSON.stringify(buildContract(loaded));
-    return contract;
+    const key = withProjections ? 'with' : 'without';
+    if (!contracts[key]) contracts[key] = JSON.stringify(buildContract(loaded, { withProjections }));
+    return contracts[key];
   },
 };

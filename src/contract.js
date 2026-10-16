@@ -11,6 +11,11 @@
 //                              (one case per rejection message)
 //                              | 400 | 404 | 409 | 500 | 503 (problems)
 //
+//   GET /projections/{Projection}   (with projections) its tags and
+//                              arguments as query parameters – a
+//                              composite one as JSON – → 200 the value
+//                              | 400 | 404 | 500 | 503 (problems)
+//
 // The host serves this document and validates requests against it, so
 // what is documented and what is enforced are one thing.
 // ============================================================
@@ -42,7 +47,57 @@ function problemResponse(description) {
   return { description, content: { 'application/problem+json': { schema: componentRef(PROBLEM) } } };
 }
 
-function buildContract(model) {
+// A projection's tags and arguments, each a query parameter: a scalar
+// by its schema, a composite – a record of fields – as JSON.
+function projectionQueryParameters(model, body) {
+  const parameter = (name, typeName) => {
+    const schema = valueTypeSchema(model, typeName, componentRef);
+    return classifyType(model, typeName).composite
+      ? { name, in: 'query', required: true, content: { 'application/json': { schema } } }
+      : { name, in: 'query', required: true, schema };
+  };
+  return [
+    ...projectionTagParams(body).map((tag) => parameter(tag.name, tag.tagType)),
+    ...(body.arguments || []).filter((a) => a && a.name).map((a) => parameter(a.name, a.propertyType)),
+  ];
+}
+
+function projectionOperation(model, projectionName, body) {
+  const value = propertySchema(model, { propertyType: body.valueType, isList: body.isList }, componentRef);
+  return {
+    get: {
+      operationId: `get${projectionName}`,
+      tags: ['projections'],
+      parameters: projectionQueryParameters(model, body),
+      responses: {
+        200: {
+          description: 'The value, folded from the events at the time of the request; null where nothing is known yet.',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  value: { anyOf: [value, { type: 'null' }] },
+                  position: {
+                    anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }],
+                    description: 'The position of the last event folded; null when it folded none.',
+                  },
+                },
+                required: ['value', 'position'],
+              },
+            },
+          },
+        },
+        400: problemResponse('The parameters do not fit the projection.'),
+        404: problemResponse('The model has no such projection.'),
+        500: problemResponse('The projection could not be folded: the model is defective, a script threw, or its value is no JSON.'),
+        503: problemResponse('The event store failed.'),
+      },
+    },
+  };
+}
+
+function buildContract(model, { withProjections = false } = {}) {
   const commands = model['command-definitions'];
   const events = model['event-definitions'];
   const schemas = customTypeSchemas(model, componentRef);
@@ -131,6 +186,12 @@ function buildContract(model) {
         responses,
       },
     };
+  }
+
+  if (withProjections) {
+    for (const [projectionName, body] of Object.entries(model['projection-definitions'])) {
+      paths[`/projections/${projectionName}`] = projectionOperation(model, projectionName, body);
+    }
   }
 
   return {

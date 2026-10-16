@@ -24,7 +24,7 @@ wasmtime::component::bindgen!({
 });
 
 pub use dcb::runtime::types::Event;
-pub use exports::dcb::runtime::decider::Outcome;
+pub use exports::dcb::runtime::decider::{Outcome, ProjectionOutcome};
 use dcb::runtime::types::{AppendCondition, AppendError, QueryItem, SequencedEvent};
 
 use crate::store::{EventStore, ReadOptions};
@@ -194,11 +194,18 @@ impl Pool {
             .await
     }
 
-    pub async fn contract(&self) -> Result<String> {
+    pub async fn project(&self, projection: &str, params: &str) -> Result<ProjectionOutcome> {
+        self.with_instance(async |store, runtime| {
+            runtime.dcb_runtime_decider().call_project(store, projection, params).await
+        })
+        .await
+    }
+
+    pub async fn contract(&self, with_projections: bool) -> Result<String> {
         self.with_instance(async |store, runtime| {
             runtime
                 .dcb_runtime_decider()
-                .call_contract(store)
+                .call_contract(store, with_projections)
                 .await?
                 .map_err(|message| format_err!("no contract: {message}"))
         })

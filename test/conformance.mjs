@@ -88,7 +88,7 @@ function componentOutcome(outcome) {
 // or its `published` / `rejected` response, checked against the schema
 // the contract states for it.
 function contractValidator() {
-  const contract = JSON.parse(decider.contract());
+  const contract = JSON.parse(decider.contract(false));
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   ajv.addSchema({ ...contract, $id: 'contract' });
   const pointer = (command, part) => {
@@ -99,6 +99,46 @@ function contractValidator() {
   return (command, part, value) => {
     const validate = ajv.compile({ $ref: pointer(command, part) });
     return validate(value) ? [] : validate.errors.map((e) => `${e.instancePath} ${e.message}`);
+  };
+}
+
+// The contract with projections: a projection's parameter – by its
+// schema, or the one its JSON content has – or its `200` body, checked
+// against what the contract states for it.
+function projectionValidator() {
+  const contract = JSON.parse(decider.contract(true));
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  ajv.addSchema({ ...contract, $id: 'contract' });
+  const at = (projection) => `contract#/paths/~1projections~1${projection}/get`;
+  const check = (pointer, value) => {
+    const validate = ajv.compile({ $ref: pointer });
+    return validate(value) ? [] : validate.errors.map((e) => `${e.instancePath} ${e.message}`);
+  };
+  return {
+    parameter(projection, name, value) {
+      const parameters = contract.paths[`/projections/${projection}`].get.parameters;
+      const index = parameters.findIndex((p) => p.name === name);
+      if (index < 0) return [`no parameter ${name}`];
+      const schema = parameters[index].content ? 'content/application~1json/schema' : 'schema';
+      return check(`${at(projection)}/parameters/${index}/${schema}`, value);
+    },
+    response(projection, body) {
+      return check(`${at(projection)}/responses/200/content/application~1json/schema`, body);
+    },
+  };
+}
+
+// A projection's parameters as one flat object: its tags, then its
+// arguments.
+const projectionParams = (read) => ({ ...read.tags, ...read.args });
+
+const project = (projection, params) => decider.project(projection, JSON.stringify(params));
+
+// What the host sends for a projected value.
+function projectedBody(outcome) {
+  return {
+    value: JSON.parse(outcome.val.value),
+    position: outcome.val.position === undefined ? null : Number(outcome.val.position),
   };
 }
 
@@ -133,6 +173,173 @@ for (const { name, envelope } of envelopes()) {
       if (actual.published && actual.published.length) {
         eq(store.all().length, log.length + actual.published.length, `${scenario.name} – appended`);
       }
+    }
+  });
+}
+
+// ---------------------------------------------------------------
+// Every projection scenario folds as the playground folds.
+// ---------------------------------------------------------------
+for (const { name, envelope } of envelopes()) {
+  check(`${name}: every projection scenario folds as the playground does`, () => {
+    const model = oracleModel(envelope);
+    decider.init(JSON.stringify(envelope));
+    const fits = projectionValidator();
+    for (const spec of Object.values(model['projection-scenario-definitions'] || {})) {
+      const log = sandbox.scenarioLog(spec);
+      const tags = {};
+      for (const [tag, literal] of Object.entries(spec.tags || {})) tags[tag] = literal && literal.tagValue;
+      const params = projectionParams({ tags, args: spec.arguments || {} });
+      store.reset(log.map((e) => storedEvent(model, e.type, e.data)));
+      for (const [param, value] of Object.entries(params)) {
+        eq(fits.parameter(spec.projection, param, value), [], `${spec.name} – ${param} fits the contract`);
+      }
+      const outcome = project(spec.projection, params);
+      let expected;
+      try {
+        expected = { value: sandbox.evNormalize(sandbox.deriveProjectionScenarioThen(model, spec)) };
+      } catch (error) {
+        expected = { error: String(error.message || error) };
+      }
+      if (outcome.tag !== 'projected') {
+        eq({ [outcome.tag]: outcome.val }, expected, spec.name);
+        continue;
+      }
+      const body = projectedBody(outcome);
+      eq(fits.response(spec.projection, body), [], `${spec.name} – the value fits the contract`);
+      eq(canonical({ value: body.value }), canonical(expected), spec.name);
+      eq(store.calls.append, 0, `${spec.name} – nothing appended`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------
+// Reading a projection.
+// ---------------------------------------------------------------
+{
+  const envelope = envelopes().find((e) => e.name === 'course-simple').envelope;
+  const model = oracleModel(envelope);
+
+  check('a projection is one read, no head, at the last position it folds', () => {
+    decider.init(JSON.stringify(envelope));
+    store.reset([
+      storedEvent(model, 'CourseDefined', { courseId: 'c1', capacity: 10 }),
+      storedEvent(model, 'CourseDefined', { courseId: 'c2', capacity: 5 }),
+      storedEvent(model, 'CourseCapacityChanged', { courseId: 'c1', newCapacity: 12 }),
+      storedEvent(model, 'CourseDefined', { courseId: 'c3', capacity: 5 }),
+    ]);
+    const outcome = project('CourseCapacity', { courseId: 'c1' });
+    eq(outcome.tag, 'projected', 'projected');
+    eq(projectedBody(outcome), { value: 12, position: 3 }, 'value and position');
+    eq({ ...store.calls }, { head: 0, read: 1, append: 0 }, 'calls');
+  });
+
+  check('a projection that folds nothing is at no position', () => {
+    decider.init(JSON.stringify(envelope));
+    store.reset([storedEvent(model, 'CourseDefined', { courseId: 'c2', capacity: 5 })]);
+    eq(projectedBody(project('CourseCapacity', { courseId: 'c1' })), { value: 0, position: null }, 'initial value');
+  });
+
+  check('unknown projections, broken parameters and a failing store say which they are', () => {
+    decider.init(JSON.stringify(envelope));
+    store.reset([]);
+    eq(project('Nope', {}).tag, 'invalid', 'no such projection');
+    eq(decider.project('CourseCapacity', '{').tag, 'invalid', 'no JSON');
+    eq(decider.project('CourseCapacity', '[1]').tag, 'invalid', 'no object');
+    eq(project('CourseCapacity', {}).tag, 'evaluation', 'a tag missing – the contract catches it first');
+    store.reset([], { failing: 'read' });
+    eq(project('CourseCapacity', { courseId: 'c1' }).tag, 'store', 'store');
+  });
+
+  check('the contract names projections only when asked to', () => {
+    decider.init(JSON.stringify(envelope));
+    const without = JSON.parse(decider.contract(false));
+    eq(Object.keys(without.paths).filter((p) => p.startsWith('/projections/')), [], 'none without');
+    const contract = JSON.parse(decider.contract(true));
+    eq(Object.keys(contract.paths).filter((p) => p.startsWith('/projections/')).sort(),
+      Object.keys(model['projection-definitions']).map((p) => `/projections/${p}`).sort(), 'one path per projection');
+    const capacity = contract.paths['/projections/CourseCapacity'].get;
+    eq(capacity.parameters, [{ name: 'courseId', in: 'query', required: true, schema: { $ref: '#/components/schemas/CourseId' } }],
+      'its tags as parameters, by type name');
+    eq(Object.keys(contract.paths).filter((p) => p.startsWith('/commands/')).length,
+      Object.keys(without.paths).length, 'the commands either way');
+  });
+}
+
+{
+  // Composite tags and arguments travel as JSON; a tag and an argument
+  // of one name would share a parameter.
+  const base = envelopes().find((e) => e.name === 'course-simple').envelope;
+  const envelope = JSON.parse(JSON.stringify(base));
+  envelope.customTypeDefinitions.push({
+    name: 'CourseRef',
+    properties: [{ name: 'courseId', propertyType: 'CourseId' }],
+  });
+  envelope.projectionDefinitions.push({
+    name: 'CapacityAbove',
+    tags: [{ name: 'course', tagType: 'CourseRef' }],
+    arguments: [{ name: 'threshold', propertyType: 'integer' }, { name: 'ref', propertyType: 'CourseRef' }],
+    valueType: 'boolean',
+    isList: false,
+    script: { initialState: false },
+    handlers: [{ event: 'CourseDefined', code: 'event.data.capacity > args.threshold' }],
+  });
+
+  check('a composite tag or argument is a JSON parameter', () => {
+    decider.init(JSON.stringify(envelope));
+    const parameters = JSON.parse(decider.contract(true)).paths['/projections/CapacityAbove'].get.parameters;
+    eq(parameters.map((p) => [p.name, p.content ? 'json' : 'plain']),
+      [['course', 'json'], ['threshold', 'plain'], ['ref', 'json']], 'composites as JSON');
+    eq(parameters[0].content['application/json'].schema, { $ref: '#/components/schemas/CourseRef' }, 'by type name');
+  });
+
+  check('a projection whose tag and argument share a name does not load', () => {
+    const clashing = JSON.parse(JSON.stringify(base));
+    const capacity = clashing.projectionDefinitions.find((p) => p.name === 'CourseCapacity');
+    capacity.arguments = [{ name: 'courseId', propertyType: 'integer' }];
+    let refused = null;
+    try { decider.init(JSON.stringify(clashing)); } catch (error) { refused = error.payload ?? error.message; }
+    eq(typeof refused === 'string' && refused.includes('courseId'), true, 'refused, naming it');
+  });
+}
+
+{
+  const envelope = envelopes().find((e) => e.name === 'content-decisions-derived.dcb.json').envelope;
+  const model = oracleModel(envelope);
+
+  check('a derived projection takes head and folds nothing after it', () => {
+    decider.init(JSON.stringify(envelope));
+    // While the current text is read, the document is published: the
+    // published text, read next, would be newer than the current one.
+    store.reset([
+      storedEvent(model, 'DocumentAdded', { id: 'd1' }),
+      storedEvent(model, 'TextUpdated', { docId: 'd1', text: 'a' }),
+    ], {
+      onRead: (n) => { if (n === 1) store.push(storedEvent(model, 'DocumentPublished', { docId: 'd1', text: 'a' })); },
+    });
+    const outcome = project('DocumentHasPendingChanges', { documentId: 'd1' });
+    eq(outcome.tag, 'projected', 'projected');
+    eq(projectedBody(outcome), { value: true, position: 2 }, 'as of head');
+    eq(store.calls.head, 1, 'head taken');
+  });
+}
+
+{
+  const base = envelopes().find((e) => e.name === 'content-decisions-scripted.dcb.json').envelope;
+  const model = oracleModel(base);
+  const scripted = (code) => {
+    const envelope = JSON.parse(JSON.stringify(base));
+    const status = envelope.projectionDefinitions.find((p) => p.name === 'DocumentStatus');
+    delete status.script.exposes;
+    status.handlers.find((h) => h.event === 'DocumentAdded').code = code;
+    return envelope;
+  };
+
+  check('a script that throws, or holds what JSON cannot, is an evaluation failure', () => {
+    for (const [what, code] of [['throws', 'null.x'], ['a Set', 'new Set([1])'], ['undefined', 'undefined']]) {
+      decider.init(JSON.stringify(scripted(code)));
+      store.reset([storedEvent(model, 'DocumentAdded', { id: 'd1' })]);
+      eq(project('DocumentStatus', { documentId: 'd1' }).tag, 'evaluation', what);
     }
   });
 }
@@ -209,7 +416,7 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
 
   check('the contract names the model\'s types and refusals', () => {
     decider.init(JSON.stringify(envelope));
-    const contract = JSON.parse(decider.contract());
+    const contract = JSON.parse(decider.contract(false));
     eq([contract.openapi, contract.info.title], ['3.1.0', model.name], 'header');
     eq(Object.keys(contract.paths).sort(), Object.keys(model['command-definitions']).map((c) => `/commands/${c}`).sort(),
       'one path per command');

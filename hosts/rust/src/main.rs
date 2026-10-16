@@ -79,6 +79,9 @@ enum Command {
         /// Serve POST /read: the events matching a DCB query, a page at a time.
         #[arg(long, env = "DCB_WITH_READ")]
         with_read: bool,
+        /// Serve GET /projections/{Projection}: a projection's value, read by its tags and arguments.
+        #[arg(long, env = "DCB_WITH_PROJECTIONS")]
+        with_projections: bool,
     },
     /// Decide one command and print the outcome as JSON.
     Run {
@@ -117,9 +120,9 @@ async fn pool(model_source: &str, common: &Common, size: usize) -> Result<Pool> 
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Serve { model, common, listen, instances, with_docs, with_read } => {
+        Command::Serve { model, common, listen, instances, with_docs, with_read, with_projections } => {
             let size = instances.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-            let api = Arc::new(http::Api::new(pool(&model, &common, size).await?, with_read).await?);
+            let api = Arc::new(http::Api::new(pool(&model, &common, size).await?, with_read, with_projections).await?);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             eprintln!("serving {model} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
             if common.store.starts_with("memory:") {

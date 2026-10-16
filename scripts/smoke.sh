@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test against a real event store: starts a throwaway container of
 # it and the HTTP server over the playground's course-simple fixture, and
-# checks each status the API answers with, and paging through /read.
+# checks each status the API answers with, paging through /read, and
+# projections.
 #
 #   scripts/smoke.sh umadb|tephra|postgres|axonserver|eventsourcingdb|memory
 #   scripts/smoke.sh compose
@@ -68,6 +69,7 @@ services:
     environment:
       DCB_INSTANCES: "8"
       DCB_WITH_READ: "true"
+      DCB_WITH_PROJECTIONS: "true"
     ports: !override
       - "127.0.0.1:$HTTP_PORT:8080"
 YAML
@@ -80,12 +82,12 @@ YAML
   done
 else
   [[ -n "$IMAGE" ]] && docker run --rm -d --name "$NAME" --publish "$STORE_PORT:$PORT" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} "$IMAGE" ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} >/dev/null
-  "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null &
+  "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read --with-projections 2>/dev/null &
   server=$!
   for _ in $(seq 1 100); do
     curl -sf "$API/health" >/dev/null 2>&1 && break
     # The server gives up when the store does not answer yet; try again.
-    kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read 2>/dev/null & server=$!; }
+    kill -0 "$server" 2>/dev/null || { "$HOST" serve "$MODEL" --listen "127.0.0.1:$HTTP_PORT" --instances 8 --with-docs --with-read --with-projections 2>/dev/null & server=$!; }
     sleep 0.2
   done
 fi
@@ -175,6 +177,17 @@ expect 400 'read, an empty item' -X POST "$API/read" -H 'content-type: applicati
 expect 400 'read, empty types' -X POST "$API/read" -H 'content-type: application/json' -d '{"items":[{"types":[]}]}'
 expect 400 'read, no JSON' -X POST "$API/read" -H 'content-type: application/json' -d '{'
 
+# Projections, over the same two events.
+shows 'true' 'contract describes projections' '.paths["/projections/CourseCapacity"].get != null' "$API/openapi.json"
+shows '1 1' 'project capacity' '"\(.value) \(.position)"' "$API/projections/CourseCapacity?courseId=c1"
+shows '["s1"] 2' 'project subscribed students' '"\(.value | tojson) \(.position)"' "$API/projections/CourseSubscribedStudentIds?courseId=c1"
+shows '0 null' 'project, nothing folded' '"\(.value) \(.position)"' "$API/projections/CourseCapacity?courseId=c9"
+shows 'no-store' 'project, not cached' '.' -o /dev/null -w '"%header{cache-control}"' "$API/projections/CourseCapacity?courseId=c1"
+expect 400 'project, a tag missing' "$API/projections/CourseCapacity"
+expect 400 'project, an unknown parameter' "$API/projections/CourseCapacity?courseId=c1&x=1"
+expect 400 'project, a parameter twice' "$API/projections/CourseCapacity?courseId=c1&courseId=c2"
+expect 404 'no such projection' "$API/projections/Nope"
+
 # A race for the last seat: the append condition must let exactly one
 # subscription through; the others are refused (422) or, having lost
 # every retry, told to retry (409) – never accepted twice.
@@ -204,6 +217,7 @@ if [[ "$1" != memory ]]; then
   expect 503 'health, store gone' "$API/health"
   shows "$KIND" 'health, store gone, kind' '.store.kind' "$API/health"
   expect 503 'read, store gone' -X POST "$API/read"
+  expect 503 'project, store gone' "$API/projections/CourseCapacity?courseId=c1"
   expect 503 'define, store gone' -X POST "$API/commands/DefineCourse" -H 'content-type: application/json' -d '{"courseId":"c4","capacity":1}'
 fi
 

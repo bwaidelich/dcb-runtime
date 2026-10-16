@@ -11,6 +11,11 @@
 //! or – `backwards` – newest first. A full page names the position to go
 //! on `after` as `next`. 501 when the store cannot read that way.
 //!
+//! `GET /projections/{Projection}` (`--with-projections`) folds a
+//! projection, read by its tags and arguments as query parameters – a
+//! scalar as it is, a composite as JSON – each checked against the
+//! contract: `{value, position}`, never cached.
+//!
 //! `GET /health` answers whether the store is serving, which store it is,
 //! its last position and how long it took to tell; 503 when it fails.
 //!
@@ -30,7 +35,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use crate::component::{Event, Outcome, Pool};
+use crate::component::{Event, Outcome, Pool, ProjectionOutcome};
 use crate::component::dcb::runtime::types::QueryItem;
 use crate::store::{EventStore, ReadOptions};
 
@@ -44,6 +49,44 @@ pub struct Api {
     validators: HashMap<String, jsonschema::Validator>,
     /// The validator of `/read`'s query; none when reads are not served.
     read: Option<jsonschema::Validator>,
+    /// Each projection's parameters; none when projections are not served.
+    projections: Option<HashMap<String, Vec<Parameter>>>,
+}
+
+/// One query parameter of a projection – a tag or an argument.
+struct Parameter {
+    name: String,
+    /// A composite, given as JSON; a scalar is given as it is.
+    json: bool,
+    validator: jsonschema::Validator,
+}
+
+impl Parameter {
+    /// The value a parameter's text stands for. A scalar's text is the
+    /// string itself when the parameter takes that, its JSON otherwise:
+    /// `c1`, `12`, `true`.
+    fn value(&self, text: &str) -> Result<Value, Vec<String>> {
+        let errors = |value: &Value| -> Vec<String> {
+            self.validator.iter_errors(value).map(|e| format!("{}: {e}", self.name)).collect()
+        };
+        let parsed = serde_json::from_str::<Value>(text);
+        if self.json {
+            let value = parsed.map_err(|e| vec![format!("{}: no JSON: {e}", self.name)])?;
+            let invalid = errors(&value);
+            return if invalid.is_empty() { Ok(value) } else { Err(invalid) };
+        }
+        let string = Value::String(text.to_string());
+        if self.validator.is_valid(&string) {
+            return Ok(string);
+        }
+        match parsed {
+            Ok(value) if !value.is_string() => {
+                let invalid = errors(&value);
+                if invalid.is_empty() { Ok(value) } else { Err(invalid) }
+            }
+            _ => Err(errors(&string)),
+        }
+    }
 }
 
 impl Api {
@@ -52,9 +95,10 @@ impl Api {
     /// `$ref` into the contract's components, so each is compiled with
     /// those components beside it.
     ///
-    /// With `read`, the contract describes `/read` as well.
-    pub async fn new(pool: Pool, read: bool) -> wasmtime::Result<Self> {
-        let mut contract = pool.contract().await?;
+    /// With `read`, the contract describes `/read` as well; with
+    /// `projections`, each projection, one validator per parameter.
+    pub async fn new(pool: Pool, read: bool, projections: bool) -> wasmtime::Result<Self> {
+        let mut contract = pool.contract(projections).await?;
         let mut document: Value = serde_json::from_str(&contract)?;
         document["paths"]["/health"] = health_operation();
         contract = document.to_string();
@@ -65,16 +109,30 @@ impl Api {
         } else {
             None
         };
-        let mut validators = HashMap::new();
-        for (path, item) in document["paths"].as_object().into_iter().flatten() {
-            let Some(command) = path.strip_prefix("/commands/") else { continue };
-            let mut schema = item["post"]["requestBody"]["content"]["application/json"]["schema"].clone();
+        let compile = |mut schema: Value, of: &str| {
             schema["components"] = document["components"].clone();
-            let validator = jsonschema::draft202012::new(&schema)
-                .map_err(|e| wasmtime::format_err!("the contract's schema for {command}: {e}"))?;
-            validators.insert(command.to_string(), validator);
+            jsonschema::draft202012::new(&schema).map_err(|e| wasmtime::format_err!("the contract's schema for {of}: {e}"))
+        };
+        let mut validators = HashMap::new();
+        let mut parameters = HashMap::new();
+        for (path, item) in document["paths"].as_object().into_iter().flatten() {
+            if let Some(command) = path.strip_prefix("/commands/") {
+                let schema = item["post"]["requestBody"]["content"]["application/json"]["schema"].clone();
+                validators.insert(command.to_string(), compile(schema, command)?);
+            } else if let Some(projection) = path.strip_prefix("/projections/") {
+                let mut of = Vec::new();
+                for parameter in item["get"]["parameters"].as_array().into_iter().flatten() {
+                    let name = parameter["name"].as_str().unwrap_or_default().to_string();
+                    let json = parameter.get("content").is_some();
+                    let schema = if json { &parameter["content"]["application/json"]["schema"] } else { &parameter["schema"] };
+                    let validator = compile(schema.clone(), &format!("{projection}'s {name}"))?;
+                    of.push(Parameter { name, json, validator });
+                }
+                parameters.insert(projection.to_string(), of);
+            }
         }
-        Ok(Self { pool, contract, validators, read })
+        let projections = projections.then_some(parameters);
+        Ok(Self { pool, contract, validators, read, projections })
     }
 }
 
@@ -143,6 +201,72 @@ async fn command(State(api): State<Arc<Api>>, Path(command): Path<String>, body:
         Ok(outcome) => outcome_response(outcome),
         // A trap – a script that ran away, a bug in the runtime. The
         // instance is gone; the next request gets a fresh one.
+        Err(e) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Evaluation failed", e.to_string(), None),
+    }
+}
+
+/// A projection's parameters as one object, by name; every one given
+/// once, and none it does not take.
+fn projection_params(parameters: &[Parameter], given: Vec<(String, String)>) -> Result<Value, Vec<String>> {
+    let mut params = serde_json::Map::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut errors = Vec::new();
+    for (name, text) in given {
+        let Some(parameter) = parameters.iter().find(|p| p.name == name) else {
+            errors.push(format!("{name}: there is no such parameter"));
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            errors.push(format!("{name}: given more than once"));
+            continue;
+        }
+        match parameter.value(&text) {
+            Ok(value) => {
+                params.insert(name, value);
+            }
+            Err(invalid) => errors.extend(invalid),
+        }
+    }
+    errors.extend(parameters.iter().filter(|p| !seen.contains(&p.name)).map(|p| format!("{}: missing", p.name)));
+    if errors.is_empty() { Ok(Value::Object(params)) } else { Err(errors) }
+}
+
+fn projection_response(outcome: ProjectionOutcome) -> Response {
+    match outcome {
+        ProjectionOutcome::Projected(p) => {
+            let value = serde_json::from_str::<Value>(&p.value).unwrap_or(Value::String(p.value));
+            (StatusCode::OK, Json(json!({ "value": value, "position": p.position }))).into_response()
+        }
+        ProjectionOutcome::Invalid(message) => problem(StatusCode::BAD_REQUEST, "Invalid request", message, None),
+        ProjectionOutcome::Evaluation(message) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Evaluation failed", message, None),
+        ProjectionOutcome::Store(message) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store failed", message, None),
+    }
+}
+
+/// A projection's value as of now – so never kept by a cache.
+async fn projection(
+    State(api): State<Arc<Api>>,
+    Path(projection): Path<String>,
+    Query(given): Query<Vec<(String, String)>>,
+) -> Response {
+    let mut response = fold(&api, &projection, given).await;
+    response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn fold(api: &Api, projection: &str, given: Vec<(String, String)>) -> Response {
+    let Some(parameters) = api.projections.as_ref().and_then(|p| p.get(projection)) else {
+        return problem(StatusCode::NOT_FOUND, "No such projection", format!("The model has no projection \"{projection}\"."), None);
+    };
+    let params = match projection_params(parameters, given) {
+        Ok(params) => params,
+        Err(errors) => {
+            return problem(StatusCode::BAD_REQUEST, "Invalid parameters", format!("The parameters do not fit {projection}."), Some(errors));
+        }
+    };
+    match api.pool.project(projection, &params.to_string()).await {
+        Ok(outcome) => projection_response(outcome),
+        // A trap, as for a command: the next request gets a fresh instance.
         Err(e) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Evaluation failed", e.to_string(), None),
     }
 }
@@ -449,7 +573,8 @@ fn docs_router() -> Router<Arc<Api>> {
         )
 }
 
-/// `/read` when `api` serves reads; `/docs` with `docs`.
+/// `/read` when `api` serves reads, `/projections/…` when it serves
+/// projections; `/docs` with `docs`.
 pub fn router(api: Arc<Api>, docs: bool) -> Router {
     let mut router = Router::new()
         .route("/commands/{command}", post(command))
@@ -457,6 +582,9 @@ pub fn router(api: Arc<Api>, docs: bool) -> Router {
         .route("/health", get(health));
     if api.read.is_some() {
         router = router.route("/read", post(read));
+    }
+    if api.projections.is_some() {
+        router = router.route("/projections/{projection}", get(projection));
     }
     if docs {
         router = router.merge(docs_router());
