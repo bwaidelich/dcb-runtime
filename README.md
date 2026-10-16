@@ -55,8 +55,8 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
    The Tephra adapter needs `protoc` 35.1; without it, add
    `--no-default-features --features umadb,postgres,axonserver,eventsourcingdb`.
 
-3. **Export the model** from the playground as JSON, e.g. `my-model.json`,
-   or use a fixture such as `playground/fixtures/course-simple.json`.
+3. **Export the model** from the playground as a `.dcb.json` file, or use a
+   fixture such as `playground/fixtures/course-simple.dcb.json`.
 
 4. **Start an event store**, e.g.:
 
@@ -74,7 +74,7 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
    to point elsewhere):
 
    ```
-   hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051
+   hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051
    ```
 
    The first start compiles the component to native code, which takes a few
@@ -92,11 +92,11 @@ Needs Node 22+, a Rust toolchain, and Docker (or any running DCB store).
 ## The HTTP API
 
 ```
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store tephra://localhost:9000   # Tephra
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store postgres://user:pw@localhost:5432/db   # PostgreSQL
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store axonserver://localhost:8124   # Axon Server (axonserver+tls:// for TLS)
-hosts/rust/target/release/dcb-runtime-host serve my-model.json --store eventsourcingdb://secret@localhost:3000   # EventSourcingDB (eventsourcingdb+tls:// for HTTPS)
+hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store umadb://localhost:50051    # UmaDB (umadb+tls:// for TLS)
+hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store tephra://localhost:9000   # Tephra
+hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store postgres://user:pw@localhost:5432/db   # PostgreSQL
+hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store axonserver://localhost:8124   # Axon Server (axonserver+tls:// for TLS)
+hosts/rust/target/release/dcb-runtime-host serve playground/fixtures/course-simple.dcb.json --store eventsourcingdb://secret@localhost:3000   # EventSourcingDB (eventsourcingdb+tls:// for HTTPS)
 ```
 
 serves the model's commands at `http://127.0.0.1:8080`:
@@ -126,7 +126,7 @@ Failures are RFC 9457 problem details. Every call to the store is
 bounded (`--store-timeout`, default 10s): a store that went away is a
 503, not a request that waits forever. The server keeps one instance of
 the component per command decided at once (`--instances`, default the
-number of CPUs, about 10 MB each). `run <model.json> <command> <args>`
+number of CPUs, about 10 MB each). `run <model.dcb.json> <command> <args>`
 decides a single command instead and prints the response body.
 
 ## Build and test

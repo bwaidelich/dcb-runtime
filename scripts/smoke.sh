@@ -14,7 +14,7 @@ STORE_PORT="${STORE_PORT:-50061}"
 HTTP_PORT="${HTTP_PORT:-18081}"
 NAME="dcb-runtime-smoke-$$"
 HOST=hosts/rust/target/release/dcb-runtime-host
-MODEL=playground/fixtures/course-simple.json
+MODEL=playground/fixtures/course-simple.dcb.json
 API="http://127.0.0.1:$HTTP_PORT"
 # A store that went away is noticed by this much at the latest.
 export DCB_STORE_TIMEOUT="${DCB_STORE_TIMEOUT:-3s}"

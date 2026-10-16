@@ -1,8 +1,8 @@
 //! A host for the DCB Runtime component over a DCB event store – UmaDB,
 //! Tephra, PostgreSQL, Axon Server or EventSourcingDB (`store.rs`).
 //!
-//!     dcb-runtime-host serve <model.json>                     an HTTP API for the model's commands
-//!     dcb-runtime-host run <model.json> <command> <args-json>  decide one command, print the outcome
+//!     dcb-runtime-host serve <model.dcb.json>                      an HTTP API for the model's commands
+//!     dcb-runtime-host run <model.dcb.json> <command> <args-json>  decide one command, print the outcome
 //!
 //! See `--help` for the options; each also reads an environment variable.
 
