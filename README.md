@@ -258,8 +258,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ## Status
 
-- The submodule pins a commit of the playground's `feature/read-port`
-  branch, which adds the read port the runtime needs.
+- The submodule pins a commit of the playground's `main` branch.
 - The component is about 14 MB: the JavaScript engine (StarlingMonkey)
   plus all of `model.js`, including the predefined models and editing
   commands the runtime never uses.
