@@ -5,7 +5,8 @@
 //!     dcb-runtime-host serve <model.dcb.json>                      an HTTP API for the model's commands
 //!     dcb-runtime-host run <model.dcb.json> <command> <args-json>  decide one command, print the outcome
 //!
-//! The model is a file or an http(s):// URL, fetched once on start.
+//! The model is a file, an http(s):// URL fetched once on start, or a playground link
+//! (`https://dcb.events/playground/#model=…` or `…#url=…`).
 //!
 //! See `--help` for the options; each also reads an environment variable.
 
@@ -61,7 +62,8 @@ fn parse_duration(text: &str) -> std::result::Result<std::time::Duration, String
 enum Command {
     /// Serve the model's commands over HTTP.
     Serve {
-        /// The model, as the playground exports it (JSON): a file, or an http(s):// URL to fetch it from.
+        /// The model, as the playground exports it (JSON): a file, an http(s):// URL to fetch it from, or a
+        /// playground link (…#model=… or …#url=…).
         #[arg(env = "DCB_MODEL")]
         model: String,
         #[command(flatten)]
@@ -85,7 +87,8 @@ enum Command {
     },
     /// Decide one command and print the outcome as JSON.
     Run {
-        /// The model, as the playground exports it (JSON): a file, or an http(s):// URL to fetch it from.
+        /// The model, as the playground exports it (JSON): a file, an http(s):// URL to fetch it from, or a
+        /// playground link (…#model=… or …#url=…).
         model: String,
         #[command(flatten)]
         common: Common,
@@ -96,11 +99,63 @@ enum Command {
     },
 }
 
-/// The model's JSON, from a file or fetched from an http(s):// URL.
-async fn model(source: &str) -> Result<String> {
+/// The model's JSON and the name to log it by: from a file, fetched from an http(s):// URL, or out of
+/// a playground link – packed into it (`#model=<gzipped, base64url-encoded JSON>`) or the address of
+/// a file holding one (`#url=<URI-encoded address>`). Whatever follows an `&` in a link is for the
+/// playground's interface, and ignored.
+async fn load_model(source: &str) -> Result<(String, String)> {
     if !(source.starts_with("http://") || source.starts_with("https://")) {
-        return std::fs::read_to_string(source).map_err(|e| format_err!("reading {source}: {e}"));
+        let text = std::fs::read_to_string(source).map_err(|e| format_err!("reading {source}: {e}"))?;
+        return Ok((text, source.to_string()));
     }
+    let fragment = source.split_once('#').map_or("", |(_, fragment)| fragment);
+    let value = |prefix: &str| fragment.strip_prefix(prefix).map(|rest| rest.split('&').next().unwrap_or(""));
+    if let Some(packed) = value("model=") {
+        let text = unpack(packed).map_err(|e| format_err!("unpacking the model in {}: {e}", shorten(source)))?;
+        let name = serde_json::from_str::<serde_json::Value>(&text)?["name"].as_str().map(str::to_string);
+        return Ok((text, name.map_or_else(|| shorten(source), |name| format!("playground model \"{name}\""))));
+    }
+    let address = match value("url=") {
+        Some(encoded) => percent_encoding::percent_decode_str(encoded).decode_utf8_lossy().into_owned(),
+        None => source.to_string(),
+    };
+    Ok((fetch(&address).await?, source.to_string()))
+}
+
+/// What a link's model may unpack to, and how long the packed form may be – as in the playground.
+const UNPACKED_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const PACKED_MAX_LENGTH: usize = 1000 * 1000;
+
+fn unpack(packed: &str) -> std::result::Result<String, String> {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use std::io::Read;
+    if packed.len() > PACKED_MAX_LENGTH {
+        return Err(format!("over {PACKED_MAX_LENGTH} characters, far more than any model"));
+    }
+    let config = GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent);
+    let bytes = base64::Engine::decode(&GeneralPurpose::new(&base64::alphabet::URL_SAFE, config), packed)
+        .map_err(|e| format!("no base64url: {e}"))?;
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(bytes.as_slice())
+        .take(UNPACKED_MAX_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("no gzipped text: {e}"))?;
+    if text.len() as u64 > UNPACKED_MAX_BYTES {
+        return Err(format!("it unpacks to more than {} MB, far more than any model", UNPACKED_MAX_BYTES / 1024 / 1024));
+    }
+    serde_json::from_str::<serde_json::Value>(&text).map_err(|e| format!("no JSON: {e}"))?;
+    Ok(text)
+}
+
+/// A link, cut to a length fit for a log line.
+fn shorten(link: &str) -> String {
+    match link.char_indices().nth(60) {
+        Some((end, _)) => format!("{}…", &link[..end]),
+        None => link.to_string(),
+    }
+}
+
+async fn fetch(source: &str) -> Result<String> {
     let fail = |e: String| format_err!("fetching {source}: {e}");
     let response = reqwest::get(source).await.map_err(|e| fail(e.to_string()))?;
     if !response.status().is_success() {
@@ -111,8 +166,7 @@ async fn model(source: &str) -> Result<String> {
     Ok(text)
 }
 
-async fn pool(model_source: &str, common: &Common, size: usize) -> Result<Pool> {
-    let model = model(model_source).await?;
+async fn pool(model: String, common: &Common, size: usize) -> Result<Pool> {
     let store = EventStore::connect(&common.store, common.store_timeout).await?;
     Pool::new(common.wasm.as_deref(), model, store, size).await
 }
@@ -122,9 +176,10 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve { model, common, listen, instances, with_docs, with_read, with_projections } => {
             let size = instances.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-            let api = Arc::new(http::Api::new(pool(&model, &common, size).await?, with_read, with_projections).await?);
+            let (model, name) = load_model(&model).await?;
+            let api = Arc::new(http::Api::new(pool(model, &common, size).await?, with_read, with_projections).await?);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
-            eprintln!("serving {model} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
+            eprintln!("serving {name} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
             if common.store.starts_with("memory:") {
                 eprintln!("warning: the events are kept in memory – gone when the host stops");
             }
@@ -142,7 +197,8 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Command::Run { model, common, command, args } => {
-            let outcome = pool(&model, &common, 1).await?.handle(&command, &args).await?;
+            let (model, _) = load_model(&model).await?;
+            let outcome = pool(model, &common, 1).await?.handle(&command, &args).await?;
             let response = http::outcome_response(outcome);
             let status = response.status();
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
@@ -153,4 +209,36 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `{"name":"Link test","dcbModelVersion":1,"sandbox":{"steps":[]}}`, packed as the playground packs it.
+    const PACKED: &str = "H4sIAAAAAAAAE6tWykvMTVWyUvLJzMtWKEktLlHSUUpJTvLNT0nNCUstKs7Mz1OyMtRRKk7MS0nKr1CyqlYqLkktKFayio6trQUAFm_x7j8AAAA";
+
+    #[tokio::test]
+    async fn unpacks_a_playground_link() {
+        let (text, name) = load_model(&format!("https://dcb.events/playground/#model={PACKED}&surface=code&experimental"))
+            .await
+            .unwrap();
+        assert_eq!(text, r#"{"name":"Link test","dcbModelVersion":1,"sandbox":{"steps":[]}}"#);
+        assert_eq!(name, r#"playground model "Link test""#);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_link_that_does_not_unpack() {
+        let error = load_model("https://dcb.events/playground/#model=H4sI").await.unwrap_err();
+        assert!(error.to_string().starts_with("unpacking the model in https://dcb.events/playground/#model=H4sI:"));
+    }
+
+    #[test]
+    fn refuses_a_model_that_unpacks_too_large() {
+        use std::io::Write;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gzip.write_all(&vec![b' '; UNPACKED_MAX_BYTES as usize + 1]).unwrap();
+        let packed = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, gzip.finish().unwrap());
+        assert!(unpack(&packed).unwrap_err().contains("more than 5 MB"));
+    }
 }

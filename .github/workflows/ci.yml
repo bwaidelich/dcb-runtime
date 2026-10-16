@@ -58,3 +58,5 @@ jobs:
         working-directory: hosts/rust
       - run: cargo build --locked
         working-directory: hosts/rust
+      - run: cargo test --locked
+        working-directory: hosts/rust

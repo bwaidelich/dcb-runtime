@@ -86,8 +86,8 @@ cargo build --release --manifest-path hosts/rust/Cargo.toml \
 </details>
 
 **2. Get a model.** Export one from the playground as a `.dcb.json` file,
-or take a fixture – or pass its `https://` URL to `serve` instead of a
-file:
+or take a fixture – or pass its `https://` URL, or the playground's
+share link, to `serve` instead of a file:
 
 ```bash
 curl -LO https://raw.githubusercontent.com/dcb-events/dcb-playground/main/fixtures/course-simple.dcb.json
@@ -127,7 +127,14 @@ curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
 | `--wasm`          | `DCB_RUNTIME_WASM`   | built in                  | another runtime component to use                      |
 
 The model is a file or an `http(s)://` URL, fetched once on start; for
-`serve`, `DCB_MODEL` names it, too.
+`serve`, `DCB_MODEL` names it, too. A playground share link works as
+well – a model packed into it (`https://dcb.events/playground/#model=…`)
+or the address of a file holding one (`…#url=…`). Quote it in a shell,
+which would otherwise cut it at the `#` or `&`:
+
+```bash
+dcb-runtime-host serve 'https://dcb.events/playground/#model=H4sI…' --store memory://
+```
 
 `dcb-runtime-host run <model.dcb.json> <command> <args>` decides a single
 command instead of serving, and prints the response body.
