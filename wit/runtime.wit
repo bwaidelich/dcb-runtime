@@ -58,9 +58,8 @@ interface decider {
   }
 
   record rejected {
-    /// The refusing rule's message, when it has one.
-    rejection: option<string>,
-    rule-index: u32,
+    /// The refusing rule's message – what the refusal is known by.
+    rejection: string,
   }
 
   variant outcome {

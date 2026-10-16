@@ -114,7 +114,7 @@ Requests are validated against the contract before anything is decided.
 | Status | Means |
 |---|---|
 | 200 | published: `{events, position}` |
-| 422 | rejected: `{rejection, ruleIndex}` |
+| 422 | rejected: `{rejection}`, one of the command's rejection messages |
 | 400 | the arguments do not fit the command |
 | 404 | the model has no such command |
 | 409 | every attempt lost the race to a concurrent append – retry |

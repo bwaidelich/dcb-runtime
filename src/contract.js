@@ -8,6 +8,7 @@
 // evaluator accepts and publishes, in the model's own type names:
 //
 //   POST /commands/{Command}   arguments → 200 published | 422 rejected
+//                              (one case per rejection message)
 //                              | 400 | 404 | 409 | 500 | 503 (problems)
 //
 // The host serves this document and validates requests against it, so
@@ -30,9 +31,10 @@ function contractHash(text) {
 }
 
 // Component names. Custom types keep theirs – they are what a generated
-// client's types should be called; events and the fixed shapes get a
-// suffix, so none of them can take a custom type's name.
+// client's types should be called; events, rejections and the fixed
+// shapes get a suffix, so none of them can take a custom type's name.
 const eventComponent = (eventName) => `${eventName}Event`;
+const rejectionComponent = (commandName) => `${commandName}Rejection`;
 const PROBLEM = 'ProblemDetails';
 const componentRef = (name) => ({ $ref: `#/components/schemas/${name}` });
 
@@ -97,23 +99,23 @@ function buildContract(model) {
       500: problemResponse('The command could not be decided: the model is defective, or a script threw.'),
       503: problemResponse('The event store failed.'),
     };
-    const conditions = (body.conditions || []).filter(Boolean);
-    if (conditions.length) {
-      // What each rule refuses with, as the evaluator reports it – a
-      // rule without a message refuses with null.
-      const messages = [...new Set(conditions.map((c) => (c.rejection === undefined ? null : c.rejection)))];
+    // One case per message: rules sharing a message are one outcome,
+    // and which rule refused is not part of it.
+    const messages = [...new Set((body.conditions || []).map((c) => c && c.rejection).filter((m) => typeof m === 'string'))];
+    if (messages.length) {
+      schemas[rejectionComponent(commandName)] = {
+        type: 'object',
+        description: `What ${commandName} can be rejected with.`,
+        properties: { rejection: { enum: messages } },
+        required: ['rejection'],
+        additionalProperties: false,
+      };
       responses[422] = {
         description: 'Rejected: one of the command\'s rules does not hold.',
         content: {
           'application/json': {
-            schema: {
-              type: 'object',
-              properties: {
-                rejection: { enum: messages },
-                ruleIndex: { type: 'integer', minimum: 0 },
-              },
-              required: ['rejection', 'ruleIndex'],
-            },
+            schema: componentRef(rejectionComponent(commandName)),
+            examples: Object.fromEntries(messages.map((m) => [m, { summary: m, value: { rejection: m } }])),
           },
         },
       };

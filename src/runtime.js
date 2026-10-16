@@ -76,8 +76,11 @@ function handleOnce(command, args, withHead) {
   }
   const { result, after } = decided;
   if (result.outcome === 'rejected') {
-    const rule = result.failedRule;
-    return { tag: 'rejected', val: { rejection: rule.rejection === null ? undefined : rule.rejection, ruleIndex: rule.index } };
+    const { rejection, index } = result.failedRule;
+    // Every rule carries a message (dcb-model.schema.json `Rule`); one
+    // without is a defective model.
+    if (rejection === null) return { tag: 'evaluation', val: `Rule ${index} of ${command} has no rejection message.` };
+    return { tag: 'rejected', val: { rejection } };
   }
   const events = result.events.map((event) => ({
     eventType: event.type,

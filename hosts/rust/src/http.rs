@@ -77,7 +77,7 @@ pub fn outcome_response(outcome: Outcome) -> Response {
         }
         Outcome::Rejected(r) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "rejection": r.rejection, "ruleIndex": r.rule_index })),
+            Json(json!({ "rejection": r.rejection })),
         )
             .into_response(),
         Outcome::Conflict => problem(

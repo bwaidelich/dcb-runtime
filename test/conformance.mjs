@@ -67,7 +67,7 @@ function oracleOutcome(model, log, command, args) {
   try {
     const result = sandbox.evaluateCommand(model, log, command, args);
     if (result.outcome === 'rejected') {
-      return { rejected: { rejection: result.failedRule.rejection, ruleIndex: result.failedRule.index } };
+      return { rejected: result.failedRule.rejection };
     }
     return { published: result.events.map((e) => ({ type: e.type, data: e.data })) };
   } catch (error) {
@@ -77,7 +77,7 @@ function oracleOutcome(model, log, command, args) {
 
 function componentOutcome(outcome) {
   switch (outcome.tag) {
-    case 'rejected': return { rejected: { rejection: outcome.val.rejection ?? null, ruleIndex: outcome.val.ruleIndex } };
+    case 'rejected': return { rejected: outcome.val.rejection };
     case 'published': return { published: outcome.val.events.map((e) => ({ type: e.eventType, data: JSON.parse(e.data) })) };
     case 'invalid': case 'evaluation': case 'store': return { error: outcome.val };
     default: return { [outcome.tag]: true };
@@ -104,7 +104,7 @@ function contractValidator() {
 
 // A response body as the host sends it.
 function responseBody(outcome) {
-  if (outcome.tag === 'rejected') return { rejection: outcome.val.rejection ?? null, ruleIndex: outcome.val.ruleIndex };
+  if (outcome.tag === 'rejected') return { rejection: outcome.val.rejection };
   return {
     events: outcome.val.events.map((e) => ({ type: e.eventType, data: JSON.parse(e.data), tags: e.tags })),
     position: outcome.val.position === undefined ? null : Number(outcome.val.position),
@@ -216,11 +216,17 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
     const define = contract.paths['/commands/DefineCourse'].post;
     eq(define.requestBody.content['application/json'].schema.properties.courseId, { $ref: '#/components/schemas/CourseId' },
       'arguments by type name');
-    eq(define.responses[422].content['application/json'].schema.properties.rejection.enum, ['Course already exists'],
+    eq(define.responses[422].content['application/json'].schema, { $ref: '#/components/schemas/DefineCourseRejection' },
+      'refusals by command name');
+    eq(contract.components.schemas.DefineCourseRejection.properties.rejection.enum, ['Course already exists'],
       'the refusals it can give');
+    eq(Object.keys(define.responses[422].content['application/json'].examples), ['Course already exists'],
+      'one example per refusal');
     const fits = contractValidator();
     eq(fits('DefineCourse', 'request', { courseId: 'c1', capacity: 2, extra: 1 }).length > 0, true, 'closed');
     eq(fits('DefineCourse', 'request', { courseId: 'c1', capacity: '2' }).length > 0, true, 'typed');
+    eq(fits('DefineCourse', 'rejected', { rejection: 'Course already exists', ruleIndex: 0 }).length > 0, true,
+      'which rule refused is not part of it');
   });
 }
 
