@@ -20,6 +20,8 @@ tokio-postgres = { version = "0.7.18", optional = true }
 tokio-stream = { version = "0.1.19", optional = true }
 tonic = { version = "0.14.6", features = ["tls-aws-lc", "tls-native-roots"], optional = true }
 tonic-prost = { version = "0.14.6", optional = true }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 umadb-client = { version = "0.7.8", optional = true }
 umadb-dcb = { version = "0.7.8", optional = true }
 uuid = { version = "1.28.0", features = ["v4"], optional = true }

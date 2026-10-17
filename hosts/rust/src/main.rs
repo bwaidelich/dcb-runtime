@@ -43,6 +43,38 @@ struct Common {
     /// A runtime component to use instead of the one built into the host.
     #[arg(long, env = "DCB_RUNTIME_WASM")]
     wasm: Option<String>,
+    /// What is logged to stderr: off, error, warn, info (every request), debug (plus the bodies, and every
+    /// call to the store – its query, its append condition) or trace; or a filter such as `info,store=debug` (targets `http`, `store`).
+    #[arg(long, env = "DCB_LOG", default_value = "info")]
+    log: String,
+    /// How each log line is written: text for a person, json – one object per line – for a log collector.
+    #[arg(long, env = "DCB_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+/// A bare level is this host's: its libraries – wasmtime, the store
+/// clients – log their warnings only. Text is coloured on a terminal
+/// only, and never with `NO_COLOR` set.
+fn init_log(log: &str, format: LogFormat) -> Result<()> {
+    use std::io::IsTerminal;
+    let levels = ["off", "error", "warn", "info", "debug", "trace"];
+    let directives = if levels.contains(&log) { format!("warn,dcb_runtime_host={log},http={log},store={log}") } else { log.to_string() };
+    let filter = tracing_subscriber::EnvFilter::try_new(&directives).map_err(|e| format_err!("--log {log}: {e}"))?;
+    let log = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    match format {
+        LogFormat::Text => {
+            let colour = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+            log.with_target(false).with_ansi(colour).init();
+        }
+        LogFormat::Json => log.json().flatten_event(true).with_span_list(false).init(),
+    }
+    Ok(())
 }
 
 /// `500ms`, `10s` or `2m`.
@@ -175,17 +207,18 @@ async fn pool(model: String, common: &Common, size: usize) -> Result<Pool> {
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve { model, common, listen, instances, with_docs, with_read, with_projections } => {
+            init_log(&common.log, common.log_format)?;
             let size = instances.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
             let (model, name) = load_model(&model).await?;
             let api = Arc::new(http::Api::new(pool(model, &common, size).await?, with_read, with_projections).await?);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
-            eprintln!("serving {name} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
+            tracing::info!("serving {name} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
             if common.store.starts_with("memory:") {
-                eprintln!("warning: the events are kept in memory – gone when the host stops");
+                tracing::warn!("the events are kept in memory – gone when the host stops");
             }
             if !listener.local_addr()?.ip().is_loopback() {
-                eprintln!(
-                    "warning: listening beyond this machine. This API is the core of your application, not its edge: \
+                tracing::warn!(
+                    "listening beyond this machine. This API is the core of your application, not its edge: \
                      call it from your application's adapters over a private network, never expose it directly. \
                      See https://github.com/bwaidelich/dcb-runtime#not-a-public-api"
                 );
@@ -197,6 +230,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Command::Run { model, common, command, args } => {
+            init_log(&common.log, common.log_format)?;
             let (model, _) = load_model(&model).await?;
             let outcome = pool(model, &common, 1).await?.handle(&command, &args).await?;
             let response = http::outcome_response(outcome);

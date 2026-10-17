@@ -125,6 +125,8 @@ curl -X POST http://127.0.0.1:8080/commands/DefineCourse \
 | `--with-read`     | `DCB_WITH_READ`      | off                       | serve [`POST /read`](#reading-events)                 |
 | `--with-projections` | `DCB_WITH_PROJECTIONS` | off                  | serve [`GET /projections/…`](#querying-projections)   |
 | `--wasm`          | `DCB_RUNTIME_WASM`   | built in                  | another runtime component to use                      |
+| `--log`           | `DCB_LOG`            | `info`                    | what is logged to stderr, see below                   |
+| `--log-format`    | `DCB_LOG_FORMAT`     | `text`                    | `text`, or `json` – one object per line               |
 
 The model is a file or an `http(s)://` URL, fetched once on start; for
 `serve`, `DCB_MODEL` names it, too. A playground share link works as
@@ -138,6 +140,19 @@ dcb-runtime-host serve 'https://dcb.events/playground/#model=H4sI…' --store me
 
 `dcb-runtime-host run <model.dcb.json> <command> <args>` decides a single
 command instead of serving, and prints the response body.
+
+`--log info` logs every request – method, path, status, duration;
+`--log debug` adds the bodies of request and response, and every call to
+the event store: the query it read with, the events it appended and the
+append condition, what came back and how long it took. `off`, `error`,
+`warn` and `trace` work too, as does a filter by target – `http` or
+`store` – such as `--log info,store=debug`.
+
+Logs go to stderr, for whatever runs the host – Docker, systemd,
+Kubernetes – to collect. Text is coloured on a terminal only (never with
+`NO_COLOR` set); `--log-format json` writes one object per line, every
+value a field of its own – a query, events and an append condition as
+JSON text.
 
 A model with a defective definition – a command that publishes nothing,
 a reference that does not resolve – does not load; the error names each

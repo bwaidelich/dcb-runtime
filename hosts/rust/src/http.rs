@@ -22,22 +22,29 @@
 //! Failures are RFC 9457 problem details. `/docs` (`--with-docs`) is
 //! Swagger UI over the contract, embedded, so it works without network
 //! access.
+//!
+//! Every request is logged at `info` – its status and duration, in a
+//! span naming method and URI; at `debug` with the JSON it carried and
+//! was answered with.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tracing::Instrument;
 
 use crate::component::{Event, Outcome, Pool, ProjectionOutcome};
 use crate::component::dcb::runtime::types::QueryItem;
-use crate::store::{EventStore, ReadOptions};
+use crate::store::{EventStore, ReadOptions, ms};
 
 /// A page of `/read`, when the request names no `limit`.
 const DEFAULT_LIMIT: u64 = 100;
@@ -573,6 +580,68 @@ fn docs_router() -> Router<Arc<Api>> {
         )
 }
 
+/// What a request body may hold – axum's own default, which reading it
+/// for the log would otherwise lift.
+const REQUEST_BODY_MAX: usize = 2 * 1024 * 1024;
+
+/// How much of a body the log shows.
+const LOGGED_BODY_MAX: usize = 4096;
+
+/// A body for the log, cut to `LOGGED_BODY_MAX`; none when empty.
+fn logged_body(bytes: &[u8]) -> Option<String> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    Some(match text.char_indices().nth(LOGGED_BODY_MAX) {
+        Some((end, _)) => format!("{}… ({} bytes)", &text[..end], bytes.len()),
+        None => text.into_owned(),
+    })
+}
+
+/// Every line logged while serving a request – the store's calls
+/// among them – is in its span, which names the method and the URI, and
+/// numbers the request, to tell concurrent ones apart.
+async fn log_request(request: Request, next: Next) -> Response {
+    static REQUESTS: AtomicU64 = AtomicU64::new(1);
+    let id = REQUESTS.fetch_add(1, Ordering::Relaxed);
+    let span = tracing::info_span!(target: "http", "request", id, method = %request.method(), uri = %request.uri());
+    serve_logged(request, next).instrument(span).await
+}
+
+async fn serve_logged(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    if !tracing::enabled!(target: "http", tracing::Level::DEBUG) {
+        let response = next.run(request).await;
+        tracing::info!(target: "http", status = response.status().as_u16(), duration_ms = ms(started), "response");
+        return response;
+    }
+    // The bodies are read whole to be logged, then handed on as they were.
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, REQUEST_BODY_MAX).await else {
+        return problem(StatusCode::PAYLOAD_TOO_LARGE, "Payload too large", format!("The body is over {REQUEST_BODY_MAX} bytes, or could not be read."), None);
+    };
+    if let Some(text) = logged_body(&bytes) {
+        tracing::debug!(target: "http", body = %text, "request body");
+    }
+    let contract = parts.uri.path() == "/openapi.json";
+    let response = next.run(Request::from_parts(parts, Body::from(bytes))).await;
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return problem(StatusCode::INTERNAL_SERVER_ERROR, "Internal error", "The response could not be read.", None);
+    };
+    let status = parts.status.as_u16();
+    tracing::info!(target: "http", status, duration_ms = ms(started), "response");
+    // JSON answers only – not the contract, not the docs' assets.
+    let json = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("json"));
+    if json && !contract
+        && let Some(text) = logged_body(&bytes)
+    {
+        tracing::debug!(target: "http", status, body = %text, "response body");
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 /// `/read` when `api` serves reads, `/projections/…` when it serves
 /// projections; `/docs` with `docs`.
 pub fn router(api: Arc<Api>, docs: bool) -> Router {
@@ -589,5 +658,5 @@ pub fn router(api: Arc<Api>, docs: bool) -> Router {
     if docs {
         router = router.merge(docs_router());
     }
-    router.with_state(api)
+    router.layer(middleware::from_fn(log_request)).with_state(api)
 }

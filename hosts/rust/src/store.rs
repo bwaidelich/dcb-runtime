@@ -37,9 +37,14 @@
 //! Every call is bounded by a timeout. A store that went away does not
 //! always say so – a client may wait on a connection nobody will answer
 //! – and a request waiting forever is worse than a 503.
+//!
+//! Every call is logged at `debug` – the query, the append condition,
+//! what came back and how long it took; a failure at `warn`.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
 
 use wasmtime::{Result, format_err};
 
@@ -201,7 +206,13 @@ impl EventStore {
                 Backend::EventSourcingDb(store) => store.head().await,
             }
         };
-        self.bounded("head", call, |m| m).await
+        let started = Instant::now();
+        let result = self.bounded("head", call, |m| m).await;
+        match &result {
+            Ok(head) => tracing::debug!(target: "store", head, duration_ms = ms(started), "head"),
+            Err(reason) => tracing::warn!(target: "store", error = %reason, duration_ms = ms(started), "head failed"),
+        }
+        result
     }
 
     /// Why this store cannot read with `options`; none when it can.
@@ -221,6 +232,7 @@ impl EventStore {
         if let Some(reason) = self.unsupported(&options) {
             return Err(reason);
         }
+        let query_json = query.as_deref().map_or(Value::from("everything"), items_json);
         let call = async {
             match &self.backend {
                 Backend::Memory(store) => store.read(query, options),
@@ -236,7 +248,23 @@ impl EventStore {
                 Backend::EventSourcingDb(store) => store.read(query, options).await,
             }
         };
-        self.bounded("read", call, |m| m).await
+        let started = Instant::now();
+        let result = self.bounded("read", call, |m| m).await;
+        let (after, limit, backwards) = (options.after, options.limit, options.backwards);
+        match &result {
+            Ok(events) => tracing::debug!(
+                target: "store",
+                query = %query_json, after, limit, backwards,
+                events = events.len(), last = events.last().map(|e| e.position), duration_ms = ms(started),
+                "read"
+            ),
+            Err(reason) => tracing::warn!(
+                target: "store",
+                query = %query_json, after, limit, backwards, error = %reason, duration_ms = ms(started),
+                "read failed"
+            ),
+        }
+        result
     }
 
     /// A timed-out append may still have landed; the request reports a
@@ -247,6 +275,10 @@ impl EventStore {
         events: Vec<Event>,
         condition: Option<AppendCondition>,
     ) -> std::result::Result<u64, AppendError> {
+        let events_json = Value::Array(events.iter().map(|e| json!({ "type": e.event_type, "tags": e.tags })).collect());
+        let condition_json = condition.as_ref().map_or(Value::Null, |c| {
+            json!({ "failIfEventsMatch": items_json(&c.fail_if_events_match), "after": c.after })
+        });
         let call = async {
             match &self.backend {
                 Backend::Memory(store) => store.append(events, condition),
@@ -262,7 +294,21 @@ impl EventStore {
                 Backend::EventSourcingDb(store) => store.append(events, condition).await,
             }
         };
-        self.bounded("append", call, AppendError::Other).await
+        let started = Instant::now();
+        let result = self.bounded("append", call, AppendError::Other).await;
+        let (events, condition) = (&events_json, &condition_json);
+        match &result {
+            Ok(position) => tracing::debug!(
+                target: "store", %events, %condition, position, duration_ms = ms(started), "append"
+            ),
+            Err(AppendError::Integrity) => tracing::debug!(
+                target: "store", %events, %condition, duration_ms = ms(started), "append: condition failed"
+            ),
+            Err(AppendError::Other(reason)) => tracing::warn!(
+                target: "store", %events, %condition, error = %reason, duration_ms = ms(started), "append failed"
+            ),
+        }
+        result
     }
 
     /// Whether the store answers; the reason when it does not.
@@ -282,8 +328,24 @@ impl EventStore {
                 Backend::EventSourcingDb(store) => store.health().await,
             }
         };
-        self.bounded("health", call, |m| m).await
+        let started = Instant::now();
+        let result = self.bounded("health", call, |m| m).await;
+        match &result {
+            Ok(()) => tracing::debug!(target: "store", duration_ms = ms(started), "health"),
+            Err(reason) => tracing::warn!(target: "store", error = %reason, duration_ms = ms(started), "health failed"),
+        }
+        result
     }
+}
+
+/// Query items as the DCB specification spells them, for the log.
+fn items_json(items: &[QueryItem]) -> Value {
+    Value::Array(items.iter().map(|item| json!({ "types": item.types, "tags": item.tags })).collect())
+}
+
+/// Milliseconds since `started`, to the microsecond, for the log.
+pub fn ms(started: Instant) -> f64 {
+    started.elapsed().as_micros() as f64 / 1000.0
 }
 
 /// The events in a vector, behind a lock: a store to try a model out
