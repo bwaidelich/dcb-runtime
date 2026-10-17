@@ -406,6 +406,15 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
     eq(handle('DefineCourse', {}).tag, 'evaluation', 'a required argument missing – the contract catches it first');
   });
 
+  check('a model with a defective definition does not load', () => {
+    const defective = JSON.parse(JSON.stringify(envelope));
+    const define = defective.commandDefinitions.find((c) => c.name === 'DefineCourse');
+    defective.commandDefinitions[defective.commandDefinitions.indexOf(define)] = { name: define.name, properties: define.properties };
+    let refused = null;
+    try { decider.init(JSON.stringify(defective)); } catch (error) { refused = error.payload ?? error.message; }
+    eq(typeof refused === 'string' && refused.includes('"DefineCourse": A command must publish at least one event.'), true, 'refused, naming it');
+  });
+
   check('a failing store is a store outcome, at every call', () => {
     decider.init(JSON.stringify(envelope));
     for (const failing of ['read', 'append']) {

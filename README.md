@@ -139,6 +139,10 @@ dcb-runtime-host serve 'https://dcb.events/playground/#model=H4sI…' --store me
 `dcb-runtime-host run <model.dcb.json> <command> <args>` decides a single
 command instead of serving, and prints the response body.
 
+A model with a defective definition – a command that publishes nothing,
+a reference that does not resolve – does not load; the error names each
+one. The playground loads it anyway, and lists it among its advisories.
+
 </details>
 
 ## Docker

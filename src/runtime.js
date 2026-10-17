@@ -140,6 +140,22 @@ function projectOnce(projection, params) {
   return { tag: 'projected', val: { value: JSON.stringify(value), position: last } };
 }
 
+// What the playground's semantic checker (`validateReferences`) finds
+// wrong with each definition.
+function defectiveDefinitions(model) {
+  const defects = [];
+  for (const kind of DEF_KINDS) {
+    for (const [name, body] of Object.entries(model[DEF_COLLECTIONS[kind]] || {})) {
+      try {
+        validateReferences(model, kind, name, body);
+      } catch (error) {
+        defects.push(`${humanize(kind)} "${name}": ${evErrorText(error)}`);
+      }
+    }
+  }
+  return defects;
+}
+
 // A tag and an argument of one name would be one parameter.
 function clashingParameters(model) {
   const clashes = [];
@@ -178,6 +194,11 @@ export const decider = {
       throw imported.skipped.map((s) => `${s.kind} "${s.name}": ${s.reason}`).join('\n');
     }
     const model = projectState()[imported.modelId];
+    // The playground loads a defective definition too, and reports it
+    // as an advisory – a command publishing nothing, a dangling
+    // reference. A runtime would decide with it; it refuses it instead.
+    const defects = defectiveDefinitions(model);
+    if (defects.length) throw defects.join('\n');
     const clashes = clashingParameters(model);
     if (clashes.length) throw clashes.join('\n');
     loaded = model;
