@@ -140,34 +140,6 @@ function projectOnce(projection, params) {
   return { tag: 'projected', val: { value: JSON.stringify(value), position: last } };
 }
 
-// What the playground's semantic checker (`validateReferences`) finds
-// wrong with each definition.
-function defectiveDefinitions(model) {
-  const defects = [];
-  for (const kind of DEF_KINDS) {
-    for (const [name, body] of Object.entries(model[DEF_COLLECTIONS[kind]] || {})) {
-      try {
-        validateReferences(model, kind, name, body);
-      } catch (error) {
-        defects.push(`${humanize(kind)} "${name}": ${evErrorText(error)}`);
-      }
-    }
-  }
-  return defects;
-}
-
-// A tag and an argument of one name would be one parameter.
-function clashingParameters(model) {
-  const clashes = [];
-  for (const [name, body] of Object.entries(model['projection-definitions'])) {
-    const tags = new Set(projectionTagParams(body).map((tag) => tag.name));
-    for (const argument of body.arguments || []) {
-      if (argument && tags.has(argument.name)) clashes.push(`projection "${name}": "${argument.name}" is a tag and an argument`);
-    }
-  }
-  return clashes;
-}
-
 export const decider = {
   init(modelJson) {
     loaded = null;
@@ -178,29 +150,20 @@ export const decider = {
     } catch (error) {
       throw `The model is no JSON: ${evErrorText(error)}`;
     }
-    // The playground keeps its models in an event log of its own; here
-    // that log holds the one model, and is started afresh per load.
-    localStorage.clear();
-    bumpLogRevision();
-    let imported;
+    // Read as the playground imports, but into no log; what the
+    // playground would only advise against – a skipped or defective
+    // definition – a runtime refuses (`executionBlockers`, model.js).
+    let fromFile;
     try {
-      imported = importModelFromEnvelope(envelope);
+      fromFile = modelFromEnvelope(envelope);
     } catch (error) {
       throw evErrorText(error);
     }
-    // Import is best-effort in the playground; a runtime deciding with
-    // a definition silently missing is not.
-    if (imported.skipped.length) {
-      throw imported.skipped.map((s) => `${s.kind} "${s.name}": ${s.reason}`).join('\n');
+    const { model, skipped } = fromFile;
+    const blockers = executionBlockers(model, skipped);
+    if (blockers.length) {
+      throw blockers.map((b) => `${humanize(b.kind)} "${b.name}": ${b.message}`).join('\n');
     }
-    const model = projectState()[imported.modelId];
-    // The playground loads a defective definition too, and reports it
-    // as an advisory – a command publishing nothing, a dangling
-    // reference. A runtime would decide with it; it refuses it instead.
-    const defects = defectiveDefinitions(model);
-    if (defects.length) throw defects.join('\n');
-    const clashes = clashingParameters(model);
-    if (clashes.length) throw clashes.join('\n');
     loaded = model;
   },
 
