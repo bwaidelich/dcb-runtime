@@ -1,4 +1,4 @@
-package dcb:runtime@0.1.0;
+package dcb:runtime@0.2.0;
 
 /// The shapes both sides of the store port share – the DCB
 /// specification's, with payloads as JSON text: a model's events are
@@ -66,7 +66,8 @@ interface decider {
     published(published),
     /// The command's rules do not hold – an ordinary outcome.
     rejected(rejected),
-    /// Every attempt lost the race to a concurrent append.
+    /// The append lost the race to a concurrent one. Deciding again
+    /// may succeed; when, and how often, is the caller's to say.
     conflict,
     /// The request does not name a command of the model, or its
     /// arguments are no JSON object.
@@ -99,6 +100,8 @@ interface decider {
 
   /// Loads a model from its JSON envelope (dcb-model.schema.json).
   init: func(model-json: string) -> result<_, string>;
+  /// Decides a command and appends what it publishes – one attempt,
+  /// with no retry: a lost race is `conflict`.
   handle: func(command: string, args-json: string) -> outcome;
   /// Folds a projection, read by `params-json`: one object of its tags
   /// and its arguments, by name.

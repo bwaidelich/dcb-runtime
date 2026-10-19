@@ -4,13 +4,16 @@
 //!
 //! An instance decides one command at a time, so concurrent requests
 //! each take one from the pool; concurrent decisions need no lock among
-//! themselves – the append condition is the lock. The bindings are
+//! themselves – the append condition is the lock. The component makes
+//! one attempt; a lost race is decided again here, after a wait, since
+//! a wait inside the component would hold its instance. The bindings are
 //! async: the guest calls `read` as a blocking function, and wasmtime
 //! suspends it while the host awaits the store.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -57,6 +60,12 @@ struct Instance {
     store: Store<Host>,
     runtime: Runtime,
 }
+
+/// How often a command is decided before a lost race is answered as a
+/// conflict, and the longest first wait between two attempts; each wait
+/// after may be twice as long as the one before.
+const MAX_ATTEMPTS: u32 = 3;
+const FIRST_BACKOFF: Duration = Duration::from_millis(10);
 
 pub struct Pool {
     engine: Engine,
@@ -190,8 +199,13 @@ impl Pool {
     }
 
     pub async fn handle(&self, command: &str, args: &str) -> Result<Outcome> {
-        self.with_instance(async |store, runtime| runtime.dcb_runtime_decider().call_handle(store, command, args).await)
-            .await
+        retrying(
+            || self.with_instance(async |store, runtime| runtime.dcb_runtime_decider().call_handle(store, command, args).await),
+            |outcome| matches!(outcome, Outcome::Conflict),
+            MAX_ATTEMPTS,
+            FIRST_BACKOFF,
+        )
+        .await
     }
 
     pub async fn project(&self, projection: &str, params: &str) -> Result<ProjectionOutcome> {
@@ -214,5 +228,78 @@ impl Pool {
 
     pub fn store(&self) -> &EventStore {
         &self.store
+    }
+}
+
+/// Runs `attempt` until it does not `lose`, at most `attempts` times.
+/// Before the n-th rerun it waits a random while up to `first`·2ⁿ⁻¹ –
+/// exponential backoff with full jitter, so writers that lost to each
+/// other spread out instead of colliding again in step. The last
+/// outcome stands, lost or not.
+async fn retrying<T, F: Future<Output = Result<T>>>(
+    mut attempt: impl FnMut() -> F,
+    lose: impl Fn(&T) -> bool,
+    attempts: u32,
+    first: Duration,
+) -> Result<T> {
+    let mut made = 0;
+    loop {
+        let outcome = attempt().await?;
+        made += 1;
+        if made >= attempts || !lose(&outcome) {
+            return Ok(outcome);
+        }
+        tokio::time::sleep(jittered(first * 2u32.pow(made - 1))).await;
+    }
+}
+
+/// Somewhere between nothing and `max`. A fresh `RandomState` is seeded
+/// at random, which is all the randomness a backoff needs.
+fn jittered(max: Duration) -> Duration {
+    let random = std::collections::hash_map::RandomState::new().hash_one(0u8);
+    max.mul_f64((random % 10_000) as f64 / 10_000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run(losses: u32, attempts: u32) -> (bool, u32) {
+        let mut made = 0;
+        let lost = retrying(
+            || {
+                made += 1;
+                let lost = made <= losses;
+                async move { Ok(lost) }
+            },
+            |lost| *lost,
+            attempts,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        (lost, made)
+    }
+
+    #[tokio::test]
+    async fn decides_again_until_it_wins() {
+        assert_eq!(run(2, 3).await, (false, 3));
+    }
+
+    #[tokio::test]
+    async fn stops_at_the_first_win() {
+        assert_eq!(run(0, 3).await, (false, 1));
+    }
+
+    #[tokio::test]
+    async fn reports_the_last_loss_when_every_attempt_lost() {
+        assert_eq!(run(5, 3).await, (true, 3));
+    }
+
+    #[test]
+    fn waits_no_longer_than_its_bound() {
+        for _ in 0..100 {
+            assert!(jittered(Duration::from_millis(10)) <= Duration::from_millis(10));
+        }
     }
 }

@@ -4,106 +4,62 @@
 // Appended by the build after the playground's `model.js` and
 // `evaluate.js`, into one module: those are classic scripts sharing one
 // scope, and everything they declare is in scope here. Nothing below
-// decides anything – the playground's evaluator does, through its read
-// port (`evDecideThroughPort`, evaluate.js); this is the cycle around it:
+// decides anything, and nothing runs the cycle around a decision
+// either – the playground's `handleCommand` and `projectFromStore`
+// (evaluate.js) do both, against a store port in the DCB
+// specification's shapes. This is the adapter between that port and
+// the WIT's `store` import: positions as BigInt on this side and as
+// numbers on that, payloads as JSON text here and values there,
+// `eventType` for `type`, and jco's error payloads unwrapped.
 //
-//   one read    read(query) → decide → pos = last position read
-//               → append(events, failIfEventsMatch: query, after: pos)
-//   more        head → pos → reads 1…n → decide
-//               → append(events, failIfEventsMatch: all reads, after: pos)
+// One attempt per call: a lost race is `conflict`, and deciding again –
+// when, how often, after how long – is the host's.
 //
-// Taking `pos` from the reads when there are several would lose an
-// update: an event matching read 1 that lands before one read 2
-// returns would sit below `after`. Whether a command asks more than
-// once is known from its boundary's chain (`deriveRounds`); should a
-// second read come unannounced anyway, the decision restarts with
-// `head`. A lost race – the append's condition failing – reruns the
-// whole cycle, up to MAX_ATTEMPTS times.
-//
-// A projection is folded the same way, `foldProjection` through a port,
-// with nothing to append: one read, or – a derived projection, one per
-// operand – head first and every read cut off at it, so the operands
-// are folded as of one position, not each as of its own.
+// Positions cross as numbers, exact up to 2^53 – far past any store
+// this serves.
 // ============================================================
 
-import { head, read, append } from 'dcb:runtime/store@0.1.0';
-
-const MAX_ATTEMPTS = 3;
-const RESTART_WITH_HEAD = Symbol('restart with head');
+import { head, read, append } from 'dcb:runtime/store@0.2.0';
 
 let loaded = null;
 // The contract, without and with projections.
 let contracts = {};
 
-// A store that failed is no fault of the model's; the outcome says so
-// (`store`), so the host can answer it as the unavailability it is.
-class StoreFailure extends Error {}
-
 // What a failed import call carries – jco hands the err payload over
 // on the thrown value.
 const payloadOf = (error) => (error && error.payload !== undefined ? error.payload : error);
 
-const fromStore = (what, call) => {
+const unwrapped = (call) => {
   try {
     return call();
   } catch (error) {
     const payload = payloadOf(error);
-    throw new StoreFailure(`${what}: ${typeof payload === 'string' ? payload : evErrorText(error)}`);
+    throw new Error(typeof payload === 'string' ? payload : evErrorText(error));
   }
 };
 
-function decide(command, args, withHead) {
-  const pos = withHead ? fromStore('head', () => head()) : undefined;
-  let calls = 0;
-  let last;
-  const port = (items) => {
-    calls++;
-    if (calls > 1 && !withHead) throw RESTART_WITH_HEAD;
-    const answered = fromStore('read', () => read(items.map(({ types, tags }) => ({ types, tags }))));
-    return answered.map(({ position, event }) => {
-      if (last === undefined || position > last) last = position;
-      // The position stays here: a script folds the event, and has no
-      // use for a BigInt it cannot clone.
-      return { type: event.eventType, data: JSON.parse(event.data) };
-    });
-  };
-  const result = evaluateCommand(loaded, port, command, args);
-  return { result, after: withHead ? pos : last };
-}
+const position = (value) => (value === undefined || value === null ? undefined : Number(value));
+const wirePosition = (value) => (value === undefined ? undefined : BigInt(value));
 
-function handleOnce(command, args, withHead) {
-  let decided;
-  try {
-    decided = decide(command, args, withHead);
-  } catch (error) {
-    if (error === RESTART_WITH_HEAD) return handleOnce(command, args, true);
-    if (error instanceof StoreFailure) return { tag: 'store', val: error.message };
-    return { tag: 'evaluation', val: evErrorText(error) };
-  }
-  const { result, after } = decided;
-  if (result.outcome === 'rejected') {
-    const { rejection, index } = result.failedRule;
-    // Every rule carries a message (dcb-model.schema.json `Rule`); one
-    // without is a defective model.
-    if (rejection === null) return { tag: 'evaluation', val: `Rule ${index} of ${command} has no rejection message.` };
-    return { tag: 'rejected', val: { rejection } };
-  }
-  const events = result.events.map((event) => ({
-    eventType: event.type,
-    data: JSON.stringify(event.data),
-    tags: tagsOfEvent(loaded, event.type, event.data),
-  }));
-  if (!events.length) return { tag: 'published', val: { events, position: undefined } };
-  // A command that reads nothing has nothing to be consistent with.
-  const condition = result.query.length ? { failIfEventsMatch: result.query, after } : undefined;
-  try {
-    return { tag: 'published', val: { events, position: append(events, condition) } };
-  } catch (error) {
-    const payload = payloadOf(error);
-    if (payload && payload.tag === 'integrity') return null;
-    return { tag: 'store', val: `append: ${payload && payload.val !== undefined ? payload.val : evErrorText(error)}` };
-  }
-}
+const toWire = ({ type, data, tags }) => ({ eventType: type, data: JSON.stringify(data), tags });
+
+const store = {
+  head: () => position(unwrapped(() => head())),
+  read: (query) => unwrapped(() => read(query)).map((sequenced) => ({
+    position: position(sequenced.position),
+    event: { type: sequenced.event.eventType, data: JSON.parse(sequenced.event.data), tags: sequenced.event.tags },
+  })),
+  append(events, condition) {
+    const wire = condition && { failIfEventsMatch: condition.failIfEventsMatch, after: wirePosition(condition.after) };
+    try {
+      return { position: position(append(events.map(toWire), wire)) };
+    } catch (error) {
+      const payload = payloadOf(error);
+      if (payload && payload.tag === 'integrity') return { integrity: true };
+      throw new Error(payload && payload.val !== undefined ? payload.val : evErrorText(error));
+    }
+  },
+};
 
 // Whether a value is JSON as it stands – what a script may have built
 // instead (a Set, a Map, undefined) would not survive the trip.
@@ -113,31 +69,6 @@ function isJson(value) {
   if (Array.isArray(value)) return value.every(isJson);
   if (typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return false;
   return Object.values(value).every(isJson);
-}
-
-// The projection, read by `params` – its tags and its arguments, by
-// name – folded through the store.
-function projectOnce(projection, params) {
-  const body = loaded['projection-definitions'][projection];
-  // Where every read is cut off – nothing, at an empty store's head.
-  const cut = derivedOf(body) ? { at: fromStore('head', () => head()) } : null;
-  let last;
-  const port = (items) => {
-    const answered = fromStore('read', () => read(items.map(({ types, tags }) => ({ types, tags }))));
-    return answered
-      .filter(({ position }) => !cut || (cut.at !== undefined && position <= cut.at))
-      .map(({ position, event }) => {
-        if (last === undefined || position > last) last = position;
-        return { type: event.eventType, data: JSON.parse(event.data) };
-      });
-  };
-  const tags = {};
-  const args = {};
-  for (const tag of projectionTagParams(body)) tags[tag.name] = evOwn(params, tag.name);
-  for (const argument of body.arguments || []) args[argument.name] = evOwn(params, argument.name);
-  const value = evNormalize(foldProjection(loaded, port, projection, { tags, args }));
-  if (!isJson(value)) return { tag: 'evaluation', val: `Projection "${projection}" holds a value that is no JSON.` };
-  return { tag: 'projected', val: { value: JSON.stringify(value), position: last } };
 }
 
 export const decider = {
@@ -180,12 +111,24 @@ export const decider = {
     if (args === null || typeof args !== 'object' || Array.isArray(args)) {
       return { tag: 'invalid', val: 'The arguments are no JSON object.' };
     }
-    const chained = deriveRounds(body).length > 1;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const outcome = handleOnce(command, args, chained);
-      if (outcome) return outcome;
+    const outcome = handleCommand(loaded, store, command, args);
+    switch (outcome.outcome) {
+      case 'published':
+        return { tag: 'published', val: { events: outcome.events.map(toWire), position: wirePosition(outcome.position) } };
+      case 'rejected': {
+        const { rejection, index } = outcome.failedRule;
+        // Every rule carries a message (dcb-model.schema.json `Rule`); one
+        // without is a defective model.
+        if (rejection === null) return { tag: 'evaluation', val: `Rule ${index} of ${command} has no rejection message.` };
+        return { tag: 'rejected', val: { rejection } };
+      }
+      case 'conflict':
+        return { tag: 'conflict' };
+      case 'store':
+        return { tag: 'store', val: outcome.message };
+      default:
+        return { tag: 'evaluation', val: outcome.message };
     }
-    return { tag: 'conflict' };
   },
 
   project(projection, paramsJson) {
@@ -202,12 +145,11 @@ export const decider = {
     if (params === null || typeof params !== 'object' || Array.isArray(params)) {
       return { tag: 'invalid', val: 'The parameters are no JSON object.' };
     }
-    try {
-      return projectOnce(projection, params);
-    } catch (error) {
-      if (error instanceof StoreFailure) return { tag: 'store', val: error.message };
-      return { tag: 'evaluation', val: evErrorText(error) };
-    }
+    const outcome = projectFromStore(loaded, store, projection, params);
+    if (outcome.outcome === 'store') return { tag: 'store', val: outcome.message };
+    if (outcome.outcome !== 'projected') return { tag: 'evaluation', val: outcome.message };
+    if (!isJson(outcome.value)) return { tag: 'evaluation', val: `Projection "${projection}" holds a value that is no JSON.` };
+    return { tag: 'projected', val: { value: JSON.stringify(outcome.value), position: wirePosition(outcome.position) } };
   },
 
   contract(withProjections) {
