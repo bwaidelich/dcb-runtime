@@ -507,8 +507,7 @@ make release              # or: make release VERSION=0.3.0
 
 - `wit/runtime.wit` – the component's world.
 - `src/runtime.js` – the decision cycle; `src/contract.js` – the
-  model's OpenAPI document; `src/shim.js` – the in-memory storage
-  `model.js` keeps its own log in.
+  model's OpenAPI document.
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.
