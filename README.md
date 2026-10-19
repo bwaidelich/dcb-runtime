@@ -420,9 +420,10 @@ exposes what the events hold, so it is off unless asked for.
 ## How it works
 
 - **The playground decides.** The component is the playground's
-  `model.js` and `evaluate.js`, unchanged, plus `src/runtime.js` – the
-  cycle around a decision. There is no second implementation of the
-  semantics.
+  `model.js` and `evaluate.js`, unchanged – the decision and the cycle
+  around it (`handleCommand`, `projectFromStore`) – plus
+  `src/runtime.js`, the adapter to the ports. There is no second
+  implementation of the semantics.
 - **Ports** (`wit/runtime.wit`):
   - exports `decider`: `init(model-json)`, `handle(command, args-json)`
     → `published | rejected | conflict | error`,
@@ -436,8 +437,10 @@ exposes what the events hold, so it is off unless asked for.
   - a chained boundary: `head` → reads → decide →
     `append(…, failIfEventsMatch: every read, after: head)`.
 
-  A failed append condition reruns the whole cycle, up to three times,
-  then reports `conflict`.
+  The component makes one attempt: a failed append condition is
+  `conflict`. The host decides again, up to three attempts in all,
+  waiting a random while of up to 10 ms, then 20 ms, in between
+  (exponential backoff with full jitter), and only then answers 409.
 
 - **Events in the store**: `type` is the event name, `data` the payload
   as JSON, `tags` the tags the model derives for it.
@@ -459,7 +462,7 @@ npm test          # conformance against the playground's own evaluator
 models and fixtures through the component, against an in-memory store
 (`hosts/node/memory-store.mjs`), and compares each outcome with the
 playground's evaluator over the same events. It also pins the cycle:
-how often the store is asked, retries, conflicts, and that an event
+how often the store is asked, conflicts, and that an event
 landing between two reads of a chained boundary is not lost. And it
 validates every scenario's arguments, and every response, against the
 model's generated contract.
@@ -506,8 +509,9 @@ make release              # or: make release VERSION=0.3.0
 ### Layout
 
 - `wit/runtime.wit` – the component's world.
-- `src/runtime.js` – the decision cycle; `src/contract.js` – the
-  model's OpenAPI document.
+- `src/runtime.js` – the adapter between the WIT ports and the
+  playground's store port; `src/contract.js` – the model's OpenAPI
+  document.
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.

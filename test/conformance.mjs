@@ -7,7 +7,7 @@
 // the scenario's Given, and through the playground's own evaluator over
 // the same Given as a log – the oracle. Then the cycle around the
 // decision: how often the store is asked, and what a concurrent append
-// does to it.
+// does to it – one attempt; retrying is the host's.
 //
 // Run `npm run build` first; then `npm test`.
 // ============================================================
@@ -365,26 +365,17 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
     eq({ ...store.calls }, { head: 0, read: 1, append: 1 }, 'calls');
   });
 
-  check('an append that lost the race is decided again', () => {
+  check('an append that lost the race is a conflict, and deciding again sees what won', () => {
     decider.init(JSON.stringify(envelope));
     // Someone else defines c1 while DefineCourse decides.
     store.reset([], {
       onRead: (n) => { if (n === 1) store.push(storedEvent(model, 'CourseDefined', { courseId: 'c1', capacity: 5 })); },
     });
+    eq(handle('DefineCourse', { courseId: 'c1', capacity: 10 }).tag, 'conflict', 'one attempt, no retry');
+    eq({ ...store.calls }, { head: 0, read: 1, append: 1 }, 'calls');
     const outcome = handle('DefineCourse', { courseId: 'c1', capacity: 10 });
     eq(outcome.tag, 'rejected', 'the second attempt sees the course');
     eq(outcome.val.rejection, 'Course already exists', 'refused');
-    eq({ ...store.calls }, { head: 0, read: 2, append: 1 }, 'calls');
-  });
-
-  check('losing every race is a conflict', () => {
-    decider.init(JSON.stringify(envelope));
-    let n = 0;
-    store.reset(seed(), {
-      onRead: () => { store.push(storedEvent(model, 'StudentRegistered', { studentId: 's1' })); n++; },
-    });
-    eq(handle('SubscribeStudentToCourse', { courseId: 'c1', studentId: 's1' }).tag, 'conflict', 'conflict');
-    eq(store.calls.append, 3, 'three attempts');
   });
 
   check('a command that publishes nothing is not appended', () => {
@@ -477,8 +468,8 @@ const handle = (command, args) => decider.handle(command, JSON.stringify(args));
         store.push(storedEvent(model, 'CourseRescheduled', { courseId: 'c2', slots: ['2026-03-01T11'] }));
       },
     });
-    eq(handle('RescheduleCourse', { courseId: 'c1', slots: ['2026-03-01T13'] }).tag, 'published', 'published');
-    eq(store.calls.append, 2, 'the first append was refused and the decision rerun');
+    eq(handle('RescheduleCourse', { courseId: 'c1', slots: ['2026-03-01T13'] }).tag, 'conflict', 'the append was refused');
+    eq(handle('RescheduleCourse', { courseId: 'c1', slots: ['2026-03-01T13'] }).tag, 'published', 'and decided again');
   });
 }
 

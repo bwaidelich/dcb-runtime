@@ -31,5 +31,5 @@ writeFileSync(at('build', 'runtime.js'),
 jco('componentize', 'build/runtime.js', '--wit', 'wit/runtime.wit', '--world-name', 'runtime',
   '--disable', 'all', '-o', 'build/dcb-runtime.wasm');
 jco('transpile', 'build/dcb-runtime.wasm', '-o', 'build/node', '--quiet',
-  '--map', 'dcb:runtime/store@0.1.0=../../hosts/node/memory-store.mjs');
+  '--map', 'dcb:runtime/store@0.2.0=../../hosts/node/memory-store.mjs');
 writeFileSync(at('build', 'node', 'package.json'), '{ "type": "module" }\n');
