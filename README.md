@@ -467,6 +467,21 @@ landing between two reads of a chained boundary is not lost. And it
 validates every scenario's arguments, and every response, against the
 model's generated contract.
 
+`cargo test` in `hosts/rust` holds every event store to the same
+suite (`src/store/conformance.rs`), through the interface the host
+uses: queries by type and tag, items ORed, paging and direction,
+append conditions, positions. It runs against the in-memory store
+always, and against a real store when an environment variable names
+one; CI starts each in a container:
+
+```bash
+DCB_TEST_POSTGRES=postgres://postgres:secret@localhost:5432/postgres \
+  cargo test --manifest-path hosts/rust/Cargo.toml store::conformance
+```
+
+The variables are `DCB_TEST_AXONSERVER`, `DCB_TEST_EVENTSOURCINGDB`,
+`DCB_TEST_POSTGRES`, `DCB_TEST_TEPHRA` and `DCB_TEST_UMADB`.
+
 <details>
 <summary><b>Smoke tests against real stores</b></summary>
 
@@ -492,8 +507,9 @@ scripts/smoke.sh memory
 
 ### Release
 
-CI (`.github/workflows/ci.yml`) runs the conformance tests and builds the
-host on every push to `main` and every pull request. A tag `vX.Y.Z` –
+CI (`.github/workflows/ci.yml`) runs the conformance tests, builds the
+host and runs its tests against every event store on every push to
+`main` and every pull request. A tag `vX.Y.Z` –
 matching `version` in `hosts/rust/Cargo.toml` – builds the hosts and
 publishes them as a GitHub release (`.github/workflows/release.yml`), and
 the Linux ones as the image `ghcr.io/bwaidelich/dcb-runtime` (`Dockerfile`),
@@ -515,12 +531,16 @@ make release              # or: make release VERSION=0.3.0
 - `scripts/build.mjs` – concatenates the sources into one module,
   `jco componentize`s it, and transpiles it for Node.
 - `hosts/node/` – the Node host's in-memory store.
-- `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store.rs` holds
-  one adapter per event store, picked by the store URL's scheme and
-  each behind a Cargo feature (`umadb`, `tephra`, `postgres`, `axonserver`,
-  `eventsourcingdb`; all by default).
-  Another DCB store is another adapter under its own scheme: `head`, `read`, `append`, and
-  its failed-condition error mapped to `Integrity`. The host embeds
+- `hosts/rust/` – the HTTP host (axum, wasmtime). `src/store/` holds
+  one adapter per event store, a file each, picked by the store URL's
+  scheme and each behind a Cargo feature (`umadb`, `tephra`, `postgres`,
+  `axonserver`, `eventsourcingdb`; all by default). `src/store/mod.rs`
+  is what the host knows of a store: the timeout, the log, and DCB's
+  edge cases, said once for every adapter.
+  Another DCB store is another file under its own scheme – `head`,
+  `read`, `append`, its failed-condition error mapped to `Integrity`,
+  and its `Kind` – and its line in `KINDS`; the conformance suite then
+  holds it to what the others do. The host embeds
   `build/dcb-runtime.wasm`, so `npm run build` comes first. Compiling the
   component to native code takes seconds, so the host keeps the result in
   the user's cache directory (`dcb-runtime/<hash>.cwasm`; beside the file,

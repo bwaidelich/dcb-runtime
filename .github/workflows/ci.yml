@@ -54,9 +54,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: hosts/rust
+      # Started first, so they are up by the time the tests run; the
+      # store conformance suite runs against each (src/store/conformance.rs).
+      - name: Start the event stores
+        run: |
+          docker run -d -p 50051:50051 umadb/umadb:latest
+          docker run -d -p 9000:9000 git.tqwewe.com/tephra/tephra:latest
+          docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=ci postgres:17
+          docker run -d -p 8124:8124 -e AXONIQ_AXONSERVER_STANDALONE_DCB=true axoniq/axonserver:latest
+          docker run -d -p 3000:3000 thenativeweb/eventsourcingdb:latest \
+            run --api-token ci --data-directory-temporary --http-enabled --https-enabled=false
       - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: hosts/rust
       - run: cargo build --locked
         working-directory: hosts/rust
       - run: cargo test --locked
         working-directory: hosts/rust
+        env:
+          DCB_TEST_UMADB: umadb://localhost:50051
+          DCB_TEST_TEPHRA: tephra://localhost:9000
+          DCB_TEST_POSTGRES: postgres://postgres:ci@localhost:5432/postgres
+          DCB_TEST_AXONSERVER: axonserver://localhost:8124
+          DCB_TEST_EVENTSOURCINGDB: eventsourcingdb://ci@localhost:3000

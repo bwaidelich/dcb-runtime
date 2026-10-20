@@ -141,6 +141,10 @@ impl Api {
         let projections = projections.then_some(parameters);
         Ok(Self { pool, contract, validators, read, projections })
     }
+
+    pub fn store(&self) -> &EventStore {
+        self.pool.store()
+    }
 }
 
 fn problem(status: StatusCode, title: &str, detail: impl Into<String>, errors: Option<Vec<String>>) -> Response {

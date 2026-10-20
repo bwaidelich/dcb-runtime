@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
             let api = Arc::new(http::Api::new(pool(model, &common, size).await?, with_read, with_projections).await?);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             tracing::info!("serving {name} on http://{listen}{}", if with_docs { " (docs at /docs)" } else { "" });
-            if common.store.starts_with("memory:") {
+            if api.store().kind() == "memory" {
                 tracing::warn!("the events are kept in memory – gone when the host stops");
             }
             if !listener.local_addr()?.ip().is_loopback() {
