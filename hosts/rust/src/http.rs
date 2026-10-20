@@ -6,6 +6,11 @@
 //!   200 published   422 rejected   400 arguments do not fit
 //!   404 no such command   409 conflict   500 evaluation   503 store
 //!
+//! The component's contract says what the model decides – 200 and 422;
+//! the failures around a decision are answered here, so they are
+//! documented here too (`COMMAND_FAILURES`, `PROJECTION_FAILURES`), with
+//! the problem details they carry.
+//!
 //! `POST /read` (`--with-read`) reads the events matching a DCB query, a
 //! page at a time: `after` a position, at most `limit` of them, oldest
 //! or – `backwards` – newest first. A full page names the position to go
@@ -45,6 +50,31 @@ use tracing::Instrument;
 use crate::component::{Event, Outcome, Pool, ProjectionOutcome};
 use crate::component::dcb::runtime::types::QueryItem;
 use crate::store::{EventStore, ReadOptions, ms};
+
+/// What a command may fail with besides a rejection, as the contract
+/// documents it – each status `outcome_response` and `command` answer
+/// with.
+const COMMAND_FAILURES: &[(StatusCode, &str)] = &[
+    (StatusCode::BAD_REQUEST, "The arguments do not fit the command."),
+    (StatusCode::NOT_FOUND, "The model has no such command."),
+    (StatusCode::CONFLICT, CONFLICT),
+    (StatusCode::INTERNAL_SERVER_ERROR, "The command could not be decided: the model is defective, or a script threw."),
+    (StatusCode::SERVICE_UNAVAILABLE, "The event store failed."),
+];
+
+/// What a projection may fail with, as the contract documents it.
+const PROJECTION_FAILURES: &[(StatusCode, &str)] = &[
+    (StatusCode::BAD_REQUEST, "The parameters do not fit the projection."),
+    (StatusCode::NOT_FOUND, "The model has no such projection."),
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "The projection could not be folded: the model is defective, a script threw, or its value is no JSON.",
+    ),
+    (StatusCode::SERVICE_UNAVAILABLE, "The event store failed."),
+];
+
+/// A lost race, after the pool decided again (`component.rs`).
+const CONFLICT: &str = "Every attempt lost the race to a concurrent append; the request may be retried.";
 
 /// A page of `/read`, when the request names no `limit`.
 const DEFAULT_LIMIT: u64 = 100;
@@ -107,6 +137,7 @@ impl Api {
     pub async fn new(pool: Pool, read: bool, projections: bool) -> wasmtime::Result<Self> {
         let mut contract = pool.contract(projections).await?;
         let mut document: Value = serde_json::from_str(&contract)?;
+        add_failures(&mut document);
         document["paths"]["/health"] = health_operation();
         contract = document.to_string();
         let read = if read {
@@ -184,12 +215,7 @@ pub fn outcome_response(outcome: Outcome) -> Response {
             Json(json!({ "rejection": r.rejection })),
         )
             .into_response(),
-        Outcome::Conflict => problem(
-            StatusCode::CONFLICT,
-            "Conflict",
-            "Every attempt lost the race to a concurrent append; the request may be retried.",
-            None,
-        ),
+        Outcome::Conflict => problem(StatusCode::CONFLICT, "Conflict", CONFLICT, None),
         Outcome::Invalid(message) => problem(StatusCode::BAD_REQUEST, "Invalid request", message, None),
         Outcome::Evaluation(message) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Evaluation failed", message, None),
         Outcome::Store(message) => problem(StatusCode::SERVICE_UNAVAILABLE, "Event store failed", message, None),
@@ -280,6 +306,46 @@ async fn fold(api: &Api, projection: &str, given: Vec<(String, String)>) -> Resp
         // A trap, as for a command: the next request gets a fresh instance.
         Err(e) => problem(StatusCode::INTERNAL_SERVER_ERROR, "Evaluation failed", e.to_string(), None),
     }
+}
+
+/// The component's contract with the failures this host answers: each
+/// command's and projection's, the problem details they carry, by
+/// status.
+fn add_failures(document: &mut Value) {
+    let response = |description: &str| {
+        json!({
+            "description": description,
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } },
+        })
+    };
+    for (path, item) in document["paths"].as_object_mut().into_iter().flatten() {
+        let (operation, failures) = if path.starts_with("/commands/") {
+            ("post", COMMAND_FAILURES)
+        } else if path.starts_with("/projections/") {
+            ("get", PROJECTION_FAILURES)
+        } else {
+            continue;
+        };
+        let Some(responses) = item[operation]["responses"].as_object_mut() else { continue };
+        for (status, description) in failures {
+            responses.insert(status.as_str().to_string(), response(description));
+        }
+        let mut sorted: Vec<_> = std::mem::take(responses).into_iter().collect();
+        sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+        responses.extend(sorted);
+    }
+    document["components"]["schemas"]["ProblemDetails"] = json!({
+        "type": "object",
+        "description": "RFC 9457 problem details.",
+        "properties": {
+            "type": { "type": "string" },
+            "title": { "type": "string" },
+            "status": { "type": "integer" },
+            "detail": { "type": "string" },
+            "errors": { "type": "array", "items": { "type": "string" }, "description": "What failed validation, one entry each." },
+        },
+        "required": ["title", "status"],
+    });
 }
 
 /// The query `/read` takes, in the DCB specification's shape. An item
@@ -663,4 +729,69 @@ pub fn router(api: Arc<Api>, docs: bool) -> Router {
         router = router.merge(docs_router());
     }
     router.layer(middleware::from_fn(log_request)).with_state(api)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::exports::dcb::runtime::decider::{Projected, Published, Rejected};
+
+    fn statuses(decided: &[StatusCode], failures: &[(StatusCode, &str)]) -> Vec<StatusCode> {
+        decided.iter().copied().chain(failures.iter().map(|(status, _)| *status)).collect()
+    }
+
+    #[test]
+    fn every_outcome_of_a_command_is_documented() {
+        let documented = statuses(&[StatusCode::OK, StatusCode::UNPROCESSABLE_ENTITY], COMMAND_FAILURES);
+        let outcomes = [
+            Outcome::Published(Published { events: Vec::new(), position: None }),
+            Outcome::Rejected(Rejected { rejection: "No.".into() }),
+            Outcome::Conflict,
+            Outcome::Invalid("invalid".into()),
+            Outcome::Evaluation("threw".into()),
+            Outcome::Store("gone".into()),
+        ];
+        for outcome in outcomes {
+            let status = outcome_response(outcome).status();
+            assert!(documented.contains(&status), "{status} is not documented");
+        }
+    }
+
+    #[test]
+    fn every_outcome_of_a_projection_is_documented() {
+        let documented = statuses(&[StatusCode::OK], PROJECTION_FAILURES);
+        let outcomes = [
+            ProjectionOutcome::Projected(Projected { value: "null".into(), position: None }),
+            ProjectionOutcome::Invalid("invalid".into()),
+            ProjectionOutcome::Evaluation("threw".into()),
+            ProjectionOutcome::Store("gone".into()),
+        ];
+        for outcome in outcomes {
+            let status = projection_response(outcome).status();
+            assert!(documented.contains(&status), "{status} is not documented");
+        }
+    }
+
+    #[test]
+    fn the_contract_documents_the_failures_beside_the_decisions() {
+        let mut document = json!({
+            "paths": {
+                "/commands/Define": { "post": { "responses": { "200": {}, "422": {} } } },
+                "/projections/Course": { "get": { "responses": { "200": {} } } },
+            },
+            "components": { "schemas": { "CourseId": {} } },
+        });
+        add_failures(&mut document);
+        let keys = |value: &Value| value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            keys(&document["paths"]["/commands/Define"]["post"]["responses"]),
+            ["200", "400", "404", "409", "422", "500", "503"]
+        );
+        assert_eq!(keys(&document["paths"]["/projections/Course"]["get"]["responses"]), ["200", "400", "404", "500", "503"]);
+        assert_eq!(
+            document["paths"]["/commands/Define"]["post"]["responses"]["409"]["content"]["application/problem+json"]["schema"],
+            json!({ "$ref": "#/components/schemas/ProblemDetails" })
+        );
+        assert_eq!(keys(&document["components"]["schemas"]), ["CourseId", "ProblemDetails"]);
+    }
 }

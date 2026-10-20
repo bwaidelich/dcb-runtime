@@ -9,15 +9,16 @@
 //
 //   POST /commands/{Command}   arguments → 200 published | 422 rejected
 //                              (one case per rejection message)
-//                              | 400 | 404 | 409 | 500 | 503 (problems)
 //
 //   GET /projections/{Projection}   (with projections) its tags and
 //                              arguments as query parameters – a
 //                              composite one as JSON – → 200 the value
-//                              | 400 | 404 | 500 | 503 (problems)
 //
-// The host serves this document and validates requests against it, so
-// what is documented and what is enforced are one thing.
+// What the model decides is said here; what goes wrong around it – a
+// request that does not fit, a lost race, a failed store – is the
+// host's to answer, so the host adds those responses, and the problem
+// details they carry. It serves the document and validates requests
+// against it, so what is documented and what is enforced are one thing.
 // ============================================================
 
 // A short, stable fingerprint of the definitions – cyrb53 – so a client
@@ -40,12 +41,7 @@ function contractHash(text) {
 // shapes get a suffix, so none of them can take a custom type's name.
 const eventComponent = (eventName) => `${eventName}Event`;
 const rejectionComponent = (commandName) => `${commandName}Rejection`;
-const PROBLEM = 'ProblemDetails';
 const componentRef = (name) => ({ $ref: `#/components/schemas/${name}` });
-
-function problemResponse(description) {
-  return { description, content: { 'application/problem+json': { schema: componentRef(PROBLEM) } } };
-}
 
 // A projection's tags and arguments, each a query parameter: a scalar
 // by its schema, a composite – a record of fields – as JSON.
@@ -88,10 +84,6 @@ function projectionOperation(model, projectionName, body) {
             },
           },
         },
-        400: problemResponse('The parameters do not fit the projection.'),
-        404: problemResponse('The model has no such projection.'),
-        500: problemResponse('The projection could not be folded: the model is defective, a script threw, or its value is no JSON.'),
-        503: problemResponse('The event store failed.'),
       },
     },
   };
@@ -113,18 +105,6 @@ function buildContract(model, { withProjections = false } = {}) {
       additionalProperties: false,
     };
   }
-  schemas[PROBLEM] = {
-    type: 'object',
-    description: 'RFC 9457 problem details.',
-    properties: {
-      type: { type: 'string' },
-      title: { type: 'string' },
-      status: { type: 'integer' },
-      detail: { type: 'string' },
-      errors: { type: 'array', items: { type: 'string' }, description: 'What failed validation, one entry each.' },
-    },
-    required: ['title', 'status'],
-  };
 
   const paths = {};
   for (const [commandName, body] of Object.entries(commands)) {
@@ -148,11 +128,6 @@ function buildContract(model, { withProjections = false } = {}) {
           },
         },
       },
-      400: problemResponse('The arguments do not fit the command.'),
-      404: problemResponse('The model has no such command.'),
-      409: problemResponse('Every attempt lost the race to a concurrent append; the request may be retried.'),
-      500: problemResponse('The command could not be decided: the model is defective, or a script threw.'),
-      503: problemResponse('The event store failed.'),
     };
     // One case per message: rules sharing a message are one outcome,
     // and which rule refused is not part of it.
